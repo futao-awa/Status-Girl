@@ -18,7 +18,7 @@ async function fetchCheck(monitor) {
   const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(monitor.timeoutMs) || 10000));
   const started = performance.now();
   try {
-    const headers = { 'user-agent': 'Status-Girl/1.0.0', ...(monitor.headers || {}) };
+    const headers = { 'user-agent': 'Status-Girl/1.0.1', ...(monitor.headers || {}) };
     const response = await fetch(url, {
       method: monitor.method || 'GET',
       headers,

@@ -4,9 +4,9 @@
 
 **把服务器的小情绪，交给值班少女。**
 
-轻量、自部署的服务监控与状态页 · v1.0.0
+轻量、自部署的服务监控与状态页 · v1.0.1
 
-[![版本](https://img.shields.io/badge/version-1.0.0-8faed3)](https://github.com/futao-awa/Status-Girl/tree/v1.0.0)
+[![版本](https://img.shields.io/badge/version-1.0.1-8faed3)](https://github.com/futao-awa/Status-Girl/tree/v1.0.1)
 [![MIT](https://img.shields.io/badge/license-MIT-b8a1d9)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-8bbfa6)](https://nodejs.org/)
 [![Tests](https://github.com/futao-awa/Status-Girl/actions/workflows/test.yml/badge.svg)](https://github.com/futao-awa/Status-Girl/actions/workflows/test.yml)
@@ -34,6 +34,8 @@
 - **值班室也要好看。** 随机或固定背景图、模糊度和玻璃透明度可在后台调整；落雪与纸张装饰随心切换。
 - **听点歌再继续吧。** 网易云 / 汽水音乐扫码连接、歌单与随机来源、逐首管理队列；前台支持暂停、切歌、拖动进度、随机和循环播放。
 - **给机器人递一张状态卡。** 后台生成只读 Token，让脚本、QQBot 或其他工具读取状态、事件与告警。
+- **按喜欢的顺序排好队。** 后台按分类查看服务并拖动排序；手机上长按分类行再拖动，公开页也会跟着调整。
+- **有新消息时敲敲门。** 后台会提醒 GitHub 新版本和更新内容，可以去看看，也可以稍后提醒或忽略这一版。
 
 原生前端 + Node.js / Express，数据保存在本地 JSON 文件里，无需单独安装数据库，也没有前端打包步骤。
 
@@ -121,7 +123,7 @@ npm start
 
 打开 `http://127.0.0.1:3000/` 与 `http://127.0.0.1:3000/admin.html`。首次启动后，去后台添加你的服务，她就开始巡查啦。
 
-**账号密码只在首次创建数据库时从环境变量读取。** 以后请在后台修改密码；调整 `.env` 不会覆盖已有账号。未设置时的本地体验账号为 `admin` / `ChangeMe123!`，首次登录会要求修改密码。
+**账号密码只在首次创建数据库时从环境变量读取。** 以后请在后台「页面与通知 → 后台安全」修改用户名或密码；调整 `.env` 不会覆盖已有账号。未设置时的本地体验账号为 `admin` / `ChangeMe123!`，首次登录会要求修改密码。
 
 正式部署请设置 `NODE_ENV=production`、使用 HTTPS，并为 `data/` 保留写入权限。宝塔、PM2、反向代理和备份步骤见 [部署指南](docs/DEPLOYMENT.md)。
 
@@ -151,7 +153,7 @@ curl -H "Authorization: Bearer YOUR_TOKEN" https://status.example.com/api/v1/sta
 npm test
 ```
 
-当前版本为 **1.0.0**，更新记录见 [CHANGELOG](CHANGELOG.md)，版本标签见 [Tags](https://github.com/futao-awa/Status-Girl/tags)。项目采用单实例 JSON 存储；大规模、多节点监控和集群部署暂不在本版本范围内。
+当前版本为 **1.0.1**，更新记录见 [CHANGELOG](CHANGELOG.md)，版本标签见 [Tags](https://github.com/futao-awa/Status-Girl/tags)。项目采用单实例 JSON 存储；大规模、多节点监控和集群部署暂不在本版本范围内。
 
 ## 📜 关于约定
 
