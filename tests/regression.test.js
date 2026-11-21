@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import { test } from 'node:test';
+import * as musicContent from '../src/music-content.js';
 
 const read = (file) => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
 const app = read('public/assets/app.js');
@@ -54,7 +55,7 @@ test('空歌单兼容网易云result数组并生成可播放队列', async () =>
   const context = vm.createContext({ Date, db:{settings:{music:{queue:[],randomEnabled:true}}}, musicData:(v)=>v?.data??v,
     musicLoggedIn:()=>true, musicProvider:()=> 'netease', musicBaseUrl:()=>'',
     musicRequest:async()=>({result:[{id:1,name:'测试歌曲',song:{id:1,name:'测试歌曲',artists:[{name:'测试歌手'}]}}]}),
-    saveDb:async()=>{} });
+    saveDb:async()=>{}, musicContent, musicAuthGeneration: 0 });
   vm.runInContext(server.slice(server.indexOf('function normalizeTrack('), server.indexOf('async function syncMusicAccount(')), context);
   const tracks = await vm.runInContext('ensureRandomMusicQueue()', context);
   assert.equal(tracks.length, 1);

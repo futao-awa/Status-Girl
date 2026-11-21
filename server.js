@@ -10,9 +10,12 @@ import crypto from 'node:crypto';
 import nodemailer from 'nodemailer';
 import QRCode from 'qrcode';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { loadDb, saveDb, id, now } from './src/store.js';
 import { appearanceSettings, validateAppearance } from './src/appearance.js';
 import { mergeCookies, normalizeQr, qrStatus, cookieValue, musicAuthError } from './src/music-auth.js';
+import * as musicContent from './src/music-content.js';
 import { qishuiSignedRequest, acceptQishuiSignature } from './src/qishui-signing.js';
 import { publicVerificationData, verificationScript, verificationRequest, verificationResponse, verificationForm, verificationBizParams } from './src/qishui-verification.js';
 import { checkMonitor, getServerMetrics, inspectSsl } from './src/checkers.js';
@@ -113,7 +116,7 @@ function neteaseWeapi(payload) {
 }
 function musicData(payload) { return payload?.data ?? payload; }
 function qishuiQuery() {
-  return { aid: 386088, app_name: 'luna_pc', device_id: musicDeviceId(), iid: db.settings.music.installId || musicDeviceId(), version_name: '3.5.1', version_code: 30050100, channel: 'official', region: 'cn', geo_region: 'cn', os_region: 'cn', device_platform: 'windows', device_type: 'Windows' };
+  return { aid: 386088, app_name: 'luna_pc', device_id: musicDeviceId(), iid: db.settings.music.installId || musicDeviceId(), fp: musicDeviceId(), version_name: '3.3.0', version_code: '359450208', channel: 'official', build_mode: 'master', region: 'cn', geo_region: 'cn', os_region: 'cn', device_platform: 'windows', device_type: 'Windows', os_version: 'Windows 11', ac: 'wifi', tz_name: 'Asia/Shanghai' };
 }
 function qishuiPassportQuery() {
   const music = db.settings.music;
@@ -124,11 +127,15 @@ function qishuiPassportQuery() {
 async function musicRequest(pathname, options = {}) {
   const adapterBase = musicBaseUrl();
   const provider = options.flow?.provider || musicProvider();
-  const base = adapterBase || (provider === 'qishui' && String(pathname).startsWith('/passport') ? 'https://api.qishui.com' : provider === 'qishui' ? QISHUI_ORIGIN : NETEASE_ORIGIN);
+  const passport = provider === 'qishui' && String(pathname).startsWith('/passport');
+  const publicSearch = !adapterBase && provider === 'qishui' && options.qishuiPublic === true;
+  const h5 = !adapterBase && provider === 'qishui' && options.qishuiH5 === true;
+  const base = adapterBase || (publicSearch ? 'https://api-vehicle.volcengine.com/v2' : h5 ? 'https://beta-luna.douyin.com/luna/h5' : passport ? 'https://api.qishui.com' : provider === 'qishui' ? QISHUI_ORIGIN : NETEASE_ORIGIN);
   const url = new URL(`${base}/${String(pathname).replace(/^\//, '')}`);
   Object.entries(options.search || {}).forEach(([key, value]) => { if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value)); });
-  if (!adapterBase && provider === 'qishui' && !String(pathname).startsWith('/passport')) Object.entries(qishuiQuery()).forEach(([key, value]) => { if (!url.searchParams.has(key)) url.searchParams.set(key, String(value)); });
-  const headers = { ...musicSessionHeaders(), ...(options.headers || {}) };
+  if (!adapterBase && provider === 'qishui' && !passport && !publicSearch) Object.entries(qishuiQuery()).forEach(([key, value]) => { if (!url.searchParams.has(key)) url.searchParams.set(key, String(value)); });
+  // 公开搜索只需要关键词，不能向目录接口发送账号 Cookie。
+  const headers = publicSearch ? { accept: 'application/json' } : { ...musicSessionHeaders(), ...(options.headers || {}) };
   if (options.flow) { delete headers.cookie; delete headers['x-session-id']; if (options.flow.cookie) headers.cookie = options.flow.cookie; }
   let body;
   if (options.form !== undefined) {
@@ -139,7 +146,10 @@ async function musicRequest(pathname, options = {}) {
     else { headers['content-type'] = 'application/json'; body = JSON.stringify(options.body); }
   }
   if (!adapterBase && provider === 'netease') headers.referer = 'https://music.163.com/';
-  if (!adapterBase && provider === 'qishui') headers.referer = 'https://qishui.com/';
+  if (!adapterBase && provider === 'qishui' && !publicSearch) {
+    headers.referer = 'https://qishui.com/';
+    if (!passport) headers['user-agent'] = h5 ? 'Luna/19.1.0 Android' : options.headers?.['user-agent'] || 'LunaPC/3.3.0(359450208)';
+  }
   if (!adapterBase && provider === 'qishui' && String(pathname).startsWith('/passport')) {
     const csrf = cookieValue(headers.cookie, 'passport_csrf_token');
     if (csrf) headers['x-tt-passport-csrf-token'] = csrf;
@@ -159,7 +169,7 @@ async function musicRequest(pathname, options = {}) {
       ? qishuiSignedRequest(url, { method: options.method || 'GET', headers, body }, options.flow)
       : { url, method: options.method || 'GET', headers, body };
     const response = await fetch(request.url, { method: request.method, headers: request.headers, body: request.body, redirect: options.flow ? 'manual' : 'follow', signal: controller.signal });
-    if (options.flow || provider === musicProvider()) mergeSetCookies(response.headers, options.flow);
+    if (!publicSearch && (options.flow || provider === musicProvider())) mergeSetCookies(response.headers, options.flow);
     // Passport 可能先下发会话，再跳转到没有网页的 API 根地址。授权已完成时
     // 直接交还会话，避免把落地页 404 当作扫码失败或再次消费二维码。
     if (options.flow && provider === 'qishui' && String(pathname).includes('/check_qrconnect/') && (cookieValue(options.flow.cookie, 'sessionid') || cookieValue(options.flow.cookie, 'sessionid_ss'))) {
@@ -172,8 +182,11 @@ async function musicRequest(pathname, options = {}) {
     }
     const text = await response.text();
     let payload;
-    try { payload = text ? JSON.parse(text) : {}; } catch { throw musicAuthError(provider, {}, response.status); }
-    if (!response.ok) throw musicAuthError(provider, payload, response.status);
+    const requestError = (value = {}) => passport || options.flow ? musicAuthError(provider, value, response.status) : musicContent.contentError(provider, value, response.status, response.ok && !text.trim());
+    if (!text.trim()) throw requestError();
+    try { payload = JSON.parse(text); } catch { throw requestError(); }
+    if (!response.ok) throw requestError(payload);
+    if (!passport && !options.flow) musicContent.assertContent(provider, payload);
     return payload;
   } catch (error) {
     if (error.code && error.retryable !== undefined) throw error;
@@ -188,63 +201,78 @@ function pickArray(value, keys = []) {
   for (const key of keys) if (Array.isArray(value?.[key])) return value[key];
   return [];
 }
-function pickMusicUrl(value) {
-  if (!value || typeof value !== 'object') return '';
-  const keys = ['url', 'audio_url', 'audioUrl', 'playUrl', 'play_url', 'download_url', 'downloadUrl', 'main_url'];
-  for (const key of keys) if (typeof value[key] === 'string' && /^https?:\/\//i.test(value[key])) return value[key];
-  for (const key of ['data', 'result', 'song', 'music', 'media', 'track_player', 'video_model']) {
-    const found = Array.isArray(value[key]) ? value[key].find((item) => pickMusicUrl(item)) : pickMusicUrl(value[key]);
-    if (found) return typeof found === 'string' ? found : pickMusicUrl(found);
-  }
-  return '';
-}
 function normalizePlaylist(item) {
-  return { id: String(item?.id ?? item?.playlist_id ?? item?.playlistId ?? ''), name: String(item?.name ?? item?.title ?? '未命名歌单'), cover: String(item?.coverImgUrl ?? item?.cover ?? item?.cover_url ?? ''), trackCount: Number(item?.trackCount ?? item?.track_count ?? item?.song_count ?? item?.trackNumberUpdate ?? item?.tracks?.length ?? 0) };
+  return musicContent.normalizePlaylist(item);
 }
 function normalizeTrack(item) {
-  const nested = item?.track || item?.entity || item?.song || item;
-  const artist = Array.isArray(nested?.ar) ? nested.ar.map((entry) => entry.name).filter(Boolean).join(' / ') : (nested?.artist ?? nested?.author ?? nested?.singer ?? nested?.artists?.[0]?.name ?? '未知歌手');
-  return { id: String(nested?.id ?? nested?.track_id ?? nested?.trackId ?? ''), title: String(nested?.name ?? nested?.title ?? nested?.track_name ?? '未命名歌曲'), artist: String(artist), album: String(nested?.al?.name ?? nested?.album?.name ?? nested?.album ?? ''), cover: String(nested?.al?.picUrl ?? nested?.album?.picUrl ?? nested?.cover ?? nested?.cover_url ?? '') };
+  return musicContent.normalizeTrack(item);
 }
 function sanitizeMusicTrack(input) {
   const track = normalizeTrack(input);
   return { id: track.id.slice(0, 120), title: track.title.slice(0, 180), artist: track.artist.slice(0, 180), album: track.album.slice(0, 180), cover: track.cover.slice(0, 500) };
 }
 function musicSearchRows(payload) {
-  const data = musicData(payload) || {};
-  return [data.result?.songs, data.data?.songs, data.songs, data.tracks, data.items, data.list, data.search_result, data.music_list].find(Array.isArray) || [];
+  return musicContent.trackRows(payload);
 }
 function musicRandomRows(payload) {
-  const data = musicData(payload) || {};
-  return [data, data.result, data.result?.songs, data.result?.result, data.result?.recommend, data.data?.songs, data.data?.tracks, data.songs, data.tracks, data.items, data.list, data.recommend].find(Array.isArray) || [];
+  return musicContent.trackRows(payload);
+}
+const musicAudioSources = new Map();
+async function resolveMusicPlayback(trackId) {
+  const provider = musicProvider();
+  const generation = musicAuthGeneration;
+  const directQishui = provider === 'qishui' && !musicBaseUrl();
+  const key = `${generation}:${trackId}`;
+  const cached = musicAudioSources.get(key);
+  if (directQishui && cached?.expiresAt > Date.now()) return cached.playback;
+  const payload = provider === 'qishui'
+    ? await musicRequest(musicBaseUrl() ? '/download/url' : '/seo_track', { qishuiH5: !musicBaseUrl(), search: { track_id: trackId, ...(!musicBaseUrl() ? { device_platform: 'web', version_name: '19.1.0', version_code: '19010000' } : {}) } })
+    : await musicRequest(musicBaseUrl() ? '/song/url/v1' : '/api/song/enhance/player/url', { search: musicBaseUrl() ? { id: trackId, level: 'standard', timestamp: Date.now() } : { ids: `[${trackId}]`, br: 192000, timestamp: Date.now() } });
+  if (generation !== musicAuthGeneration) throw new Error('音乐连接已变更，请重试');
+  const playback = musicContent.playback(payload);
+  if (directQishui && playback.url) {
+    musicContent.audioSourceUrl(playback.url);
+    const upstreamExpiry = Number(payload.track_player?.expire_at || 0) * 1000 - 15000;
+    const expiresAt = Math.min(Date.now() + 300000, upstreamExpiry > Date.now() ? upstreamExpiry : Date.now() + 300000);
+    musicAudioSources.delete(key);
+    musicAudioSources.set(key, { playback, expiresAt });
+    if (musicAudioSources.size > 300) musicAudioSources.delete(musicAudioSources.keys().next().value);
+  }
+  return playback;
 }
 let randomMusicLoading = null;
-async function ensureRandomMusicQueue() {
+let randomMusicError = null;
+async function ensureRandomMusicQueue(strict = false) {
   const music = db.settings.music || {};
   if (music.randomEnabled === false || !musicLoggedIn()) return Array.isArray(music.queue) ? music.queue : [];
   if (Array.isArray(music.queue) && music.queue.length) return music.queue;
-  if (randomMusicLoading) return randomMusicLoading;
+  if (randomMusicLoading) { try { return await randomMusicLoading; } catch (error) { if (strict) throw error; return music.queue || []; } }
+  const generation = musicAuthGeneration;
   randomMusicLoading = (async () => {
     try {
       const provider = musicProvider();
       const payload = provider === 'qishui'
-        ? await musicRequest('/recommend', { method: musicBaseUrl() ? 'GET' : 'POST', body: musicBaseUrl() ? undefined : { count: 50, page: 1 } })
+        ? await musicRequest(musicBaseUrl() ? '/recommend' : '/feed/song-tab', { method: musicBaseUrl() ? 'GET' : 'POST', body: musicBaseUrl() ? undefined : { feed_counts: { mix_session_count: 1 }, is_did_first_request: false, is_first_request: true, played_media: [], did_first_use_time: Math.floor(Date.now() / 1000) } })
         : await musicRequest(musicBaseUrl() ? '/personalized/newsong' : '/api/personalized/newsong', { search: { limit: 50, timestamp: Date.now() } });
       const rows = musicRandomRows(payload).map(normalizeTrack).map(sanitizeMusicTrack).filter((track) => track.id).slice(0, 100);
+      if (generation !== musicAuthGeneration) throw new Error('音乐连接已变更，请重试');
+      if (music.queue?.length) return music.queue;
+      randomMusicError = null;
       if (rows.length) {
         music.queue = rows;
         music.playlistId = '';
         music.playlistName = '平台随机音乐';
         await saveDb(db);
       }
-      return music.queue;
-    } catch {
       return Array.isArray(music.queue) ? music.queue : [];
+    } catch (error) {
+      if (generation === musicAuthGeneration) randomMusicError = error;
+      throw error;
     } finally {
       randomMusicLoading = null;
     }
   })();
-  return randomMusicLoading;
+  try { return await randomMusicLoading; } catch (error) { if (strict) throw error; return Array.isArray(music.queue) ? music.queue : []; }
 }
 async function syncMusicAccount() {
   if (!musicConfigured() || !musicLoggedIn()) return null;
@@ -434,12 +462,14 @@ app.get('/api/music/config', async (_req, res) => {
   if (musicConfigured() && musicLoggedIn() && !account) { try { account = await syncMusicAccount(); } catch { /* keep public playback available while the provider is slow */ } }
   const music = db.settings.music || {};
   if (music.randomEnabled !== false && musicLoggedIn() && !music.queue?.length) await ensureRandomMusicQueue();
-  res.json({ configured: musicConfigured(), provider: musicProvider(), loggedIn: musicLoggedIn(), account, providerLabel: musicProvider() === 'qishui' ? '汽水音乐' : '网易云音乐', playlistName: music.playlistName || '', randomEnabled: music.randomEnabled !== false, playMode: music.playMode || 'random', queue: Array.isArray(music.queue) ? music.queue.slice(0, 300) : [] });
+  res.json({ configured: musicConfigured(), provider: musicProvider(), loggedIn: musicLoggedIn(), account, providerLabel: musicProvider() === 'qishui' ? '汽水音乐' : '网易云音乐', playlistName: music.playlistName || '', randomEnabled: music.randomEnabled !== false, playMode: music.playMode || 'random', queue: Array.isArray(music.queue) ? music.queue.slice(0, 300) : [], ...(randomMusicError && !music.queue?.length ? { error: randomMusicError.message } : {}) });
 });
 app.get('/api/music/random', async (_req, res) => {
-  const queue = await ensureRandomMusicQueue();
-  if (!queue.length) return res.status(404).json({ error: musicLoggedIn() ? '平台暂时没有返回随机歌曲' : '请先在后台连接音乐平台' });
-  res.json({ queue: queue.slice(0, 300), playlistName: db.settings.music.playlistName || '平台随机音乐' });
+  try {
+    const queue = await ensureRandomMusicQueue(true);
+    if (!queue.length) return res.status(404).json({ error: musicLoggedIn() ? '平台暂时没有返回随机歌曲' : '请先在后台连接音乐平台' });
+    res.json({ queue: queue.slice(0, 300), playlistName: db.settings.music.playlistName || '平台随机音乐' });
+  } catch (error) { res.status(502).json({ error: error.message }); }
 });
 function removeMusicQrFlow(token) {
   const flow = musicQrFlows.get(token);
@@ -687,7 +717,12 @@ app.get('/api/music/search', requireAdmin, async (req, res) => {
     } else if (provider === 'netease') {
       payload = await musicRequest('/weapi/cloudsearch/pc', { method: 'POST', form: neteaseWeapi({ s: query, type: 1, offset: 0, total: true, limit: 30 }) });
     } else {
-      payload = await musicRequest('/search', { method: 'POST', body: { keyword: query, query, page: 1, page_size: 30, count: 30 } });
+      try {
+        payload = await musicRequest('/search/track', { search: { q: query, cursor: '0', count: 30, search_method: 'input' } });
+      } catch (error) {
+        if (error.code !== 'UPSTREAM_EMPTY') throw error;
+        payload = await musicRequest('/search/type', { qishuiPublic: true, search: { keyword: query, search_type: 'music', search_source: 'qishui', limit: 30, real_offset: 0 } });
+      }
     }
     const tracks = musicSearchRows(payload).map(sanitizeMusicTrack).filter((track) => track.id).slice(0, 30);
     res.json({ tracks });
@@ -738,11 +773,21 @@ app.post('/api/music/playlist/:id', requireAdmin, async (req, res) => {
     if (!musicLoggedIn()) return res.status(401).json({ error: '请先扫码登录音乐平台' });
     const playlistId = String(req.params.id);
     const provider = musicProvider();
-    const payload = provider === 'qishui'
-      ? await musicRequest('/playlist/detail', { search: { playlist_id: playlistId, cursor: '', count: 100 } })
-      : await musicRequest(musicBaseUrl() ? '/playlist/track/all' : '/api/playlist/track/all', { search: { id: playlistId, limit: 100, offset: 0, timestamp: Date.now() } });
-    const data = musicData(payload);
-    const rows = pickArray(data, ['songs', 'tracks', 'items', 'list', 'media_resources']).map(normalizeTrack).filter((item) => item.id).slice(0, 300);
+    const generation = musicAuthGeneration;
+    const tracks = new Map();
+    let cursor = '';
+    for (let page = 0; page < 10 && tracks.size < 300; page++) {
+      const payload = provider === 'qishui'
+        ? await musicRequest('/playlist/detail', { search: { playlist_id: playlistId, cursor, count: 100, ...(!musicBaseUrl() ? { version_name: '3.6.0', version_code: '30060000' } : {}) }, ...(!musicBaseUrl() ? { headers: { 'user-agent': 'LunaPC/3.6.0(424921879)' } } : {}) })
+        : await musicRequest(musicBaseUrl() ? '/playlist/track/all' : '/api/playlist/track/all', { search: { id: playlistId, limit: 300, offset: 0, timestamp: Date.now() } });
+      for (const track of musicSearchRows(payload).map(sanitizeMusicTrack).filter(item => item.id)) tracks.set(track.id, track);
+      const data = musicData(payload);
+      const next = String(data.next_cursor || '');
+      if (provider !== 'qishui' || !next || next === cursor || data.has_more === false) break;
+      cursor = next;
+    }
+    const rows = [...tracks.values()].slice(0, 300);
+    if (generation !== musicAuthGeneration) throw new Error('音乐连接已变更，请重试');
     if (!rows.length) return res.status(404).json({ error: '这个歌单没有可播放歌曲' });
     db.settings.music.playlistId = playlistId;
     db.settings.music.playlistName = String(req.body?.name || db.settings.music.playlistName || '已选歌单').slice(0, 120);
@@ -757,13 +802,51 @@ app.get('/api/music/track/:id/url', async (req, res) => {
   try {
     if (!musicLoggedIn()) return res.status(401).json({ error: '请先扫码登录音乐平台' });
     const trackId = String(req.params.id);
-    const payload = musicProvider() === 'qishui'
-      ? await musicRequest(musicBaseUrl() ? '/download/url' : '/track_v2', { method: musicBaseUrl() ? 'GET' : 'POST', search: musicBaseUrl() ? { track_id: trackId } : {}, body: musicBaseUrl() ? undefined : { track_id: trackId, media_type: 'audio', queue_type: 'search_one_track', scene_name: 'search' } })
-      : await musicRequest(musicBaseUrl() ? '/song/url/v1' : '/api/song/enhance/player/url', { search: musicBaseUrl() ? { id: trackId, level: 'standard', timestamp: Date.now() } : { ids: `[${trackId}]`, br: 192000, timestamp: Date.now() } });
-    const url = pickMusicUrl(payload);
-    if (!url) return res.status(404).json({ error: '当前歌曲没有可播放音源' });
-    res.json({ url });
+    const playback = await resolveMusicPlayback(trackId);
+    if (!playback.url) return res.status(404).json({ error: '平台未提供这首歌可直接播放的音源，可能受会员或版权限制' });
+    res.setHeader('cache-control', 'no-store');
+    res.json({ ...playback, url: musicProvider() === 'qishui' && !musicBaseUrl() ? `/api/music/track/${encodeURIComponent(trackId)}/audio` : playback.url });
   } catch (error) { res.status(502).json({ error: error.message }); }
+});
+app.get('/api/music/track/:id/audio', async (req, res) => {
+  if (!musicLoggedIn()) return res.status(401).json({ error: '请先扫码登录音乐平台' });
+  if (musicProvider() !== 'qishui' || musicBaseUrl()) return res.status(404).json({ error: '当前平台使用直接播放' });
+  const range = req.headers.range;
+  if (range && (!/^bytes=(?:\d+-\d*|-\d+)$/.test(range) || range.length > 100)) return res.status(416).end();
+  const controller = new AbortController();
+  const disconnect = () => { if (!res.writableEnded) controller.abort(); };
+  res.once('close', disconnect);
+  let timer;
+  try {
+    const generation = musicAuthGeneration;
+    const playback = await resolveMusicPlayback(String(req.params.id));
+    if (!playback.url) return res.status(404).json({ error: '平台未提供可播放音源' });
+    let url = musicContent.audioSourceUrl(playback.url);
+    const headers = { accept: 'audio/*', 'accept-encoding': 'identity', referer: 'https://music.douyin.com/' };
+    if (range) headers.range = range;
+    if (req.headers['if-range']) headers['if-range'] = req.headers['if-range'];
+    timer = setTimeout(() => controller.abort(), 15000);
+    let response;
+    for (let redirects = 0; redirects <= 3; redirects++) {
+      response = await fetch(url, { headers, redirect: 'manual', signal: controller.signal });
+      if (![301, 302, 303, 307, 308].includes(response.status)) break;
+      await response.body?.cancel();
+      url = musicContent.audioSourceUrl(new URL(response.headers.get('location') || '', url).href);
+    }
+    clearTimeout(timer);
+    if (generation !== musicAuthGeneration) { await response.body?.cancel(); throw new Error('音乐连接已变更，请重试'); }
+    if (response.status === 416) { await response.body?.cancel(); res.status(416); const value = response.headers.get('content-range'); if (value) res.setHeader('content-range', value); return res.end(); }
+    const type = response.headers.get('content-type') || '';
+    if (![200, 206].includes(response.status) || !/^(audio\/|application\/octet-stream)/i.test(type)) { await response.body?.cancel(); throw new Error(`音乐音源请求失败（HTTP ${response.status}）`); }
+    res.status(response.status);
+    res.setHeader('content-type', type);
+    res.setHeader('cache-control', 'private, no-store');
+    for (const name of ['content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) { const value = response.headers.get(name); if (value) res.setHeader(name, value); }
+    await pipeline(Readable.fromWeb(response.body), res);
+  } catch (error) {
+    if (controller.signal.aborted && res.destroyed) return;
+    if (res.headersSent) res.destroy(); else res.status(502).json({ error: controller.signal.aborted ? '音乐音源响应超时，请稍后重试' : error.message });
+  } finally { clearTimeout(timer); res.removeListener('close', disconnect); }
 });
 app.post('/api/music/logout', requireAdmin, async (_req, res) => { musicAuthGeneration += 1; clearMusicQrFlows(); db.settings.music.cookie = ''; db.settings.music.sessionId = ''; db.settings.music.account = null; db.settings.music.playlistId = ''; db.settings.music.playlistName = ''; db.settings.music.queue = []; await saveDb(db); res.json({ ok: true }); });
 app.put('/api/admin/music/provider', requireAdmin, async (req, res) => {

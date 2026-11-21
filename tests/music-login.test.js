@@ -14,6 +14,7 @@ import QRCode from 'qrcode';
 import { cookieValue, mergeCookies, normalizeQr, qrStatus, musicAuthError } from '../src/music-auth.js';
 import { qishuiSignedRequest, acceptQishuiSignature } from '../src/qishui-signing.js';
 import * as verificationHelpers from '../src/qishui-verification.js';
+import * as musicContent from '../src/music-content.js';
 
 const source = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
 const frontendSource = readFileSync(new URL('../public/assets/admin.js', import.meta.url), 'utf8');
@@ -71,7 +72,7 @@ async function fixture(t, provider, upstream, adapter = false) {
   let clock = Date.now();
   const context = vm.createContext({
     app, db, Date: class extends Date { static now() { return clock; } }, crypto: { ...crypto, randomInt: (min, max) => max === undefined ? 0 : crypto.randomInt(min, max) }, Buffer, URL, URLSearchParams, AbortSignal, AbortController, setTimeout, clearTimeout,
-    process: { env: {} }, musicAuthError, mergeCookies, cookieValue, normalizeQr, qrStatus,
+    process: { env: {} }, musicAuthError, mergeCookies, cookieValue, normalizeQr, qrStatus, musicContent,
     requireAdmin(req, _res, next) { req.user = { userId: req.headers['x-test-user'] || 'test-admin' }; next(); },
     id: () => crypto.randomUUID(), saveDb: data => writeFile(file, JSON.stringify(data)),
     musicQrData: url => QRCode.toDataURL(url),

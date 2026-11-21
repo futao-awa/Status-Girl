@@ -35,6 +35,7 @@
       this.played = new Set();
       this.scrubbing = false;
       this.previewTime = null;
+      this.isPreview = false;
       this.bind();
       this.loadConfig();
     }
@@ -70,7 +71,7 @@
       this.audio.addEventListener('durationchange', () => this.renderProgress());
       this.audio.addEventListener('emptied', () => this.renderProgress());
       this.audio.addEventListener('ended', () => this.handleEnded());
-      this.audio.addEventListener('play', () => { this.isPlaying = true; this.autoplayBlocked = false; this.setState('正在播放'); this.render(); });
+      this.audio.addEventListener('play', () => { this.isPlaying = true; this.autoplayBlocked = false; this.setState(this.isPreview ? '正在试听 · 完整播放受平台限制' : '正在播放'); this.render(); });
       this.audio.addEventListener('pause', () => { this.isPlaying = false; if (!this.loadingTrack && !this.audio.ended) this.setState('已暂停'); this.render(); });
       this.audio.addEventListener('error', () => { this.isPlaying = false; this.setState('当前音源无法播放 · 请切换歌曲'); this.render(); });
       const resumeAutoplay = (event) => {
@@ -155,6 +156,7 @@
         if (remember && this.trackIndex >= 0 && this.trackIndex !== index) this.history.push(this.trackIndex);
         this.history = this.history.slice(-30);
         this.trackIndex = index;
+        this.isPreview = result.preview === true;
         this.played.add(index);
         this.isPlaying = false;
         this.autoplayBlocked = false;
