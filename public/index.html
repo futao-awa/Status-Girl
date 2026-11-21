@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#cbd9ea">
+  <title>Status姬 · 服务状态</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=Noto+Sans+SC:wght@400;500;600;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/styles.css?v=20261121p">
+</head>
+<body class="status-body is-loading decor-snow">
+  <div class="page-loader" id="pageLoader" aria-live="polite"><div class="loader-logo" aria-label="Status姬"><span>S</span><span>T</span><span>A</span><span>T</span><span>U</span><span>S</span><i></i><span>姬</span></div><div class="loader-line"><i></i><span>正在拼接状态中心</span></div><div class="loader-orbit"></div></div>
+  <img class="random-wallpaper" id="randomWallpaper" alt="" aria-hidden="true">
+  <svg class="icon-sprite" aria-hidden="true">
+    <symbol id="i-galaxy" viewBox="0 0 24 24"><path d="M12 2.7 13.6 9l6.2 3-6.2 1.6L12 20l-1.6-6.4L4 12l6.4-3L12 2.7Z"/><path d="M18.6 4.3v3.1M20.15 5.85h-3.1M5.4 16.4v2.6M6.7 17.7H4.1"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1.3"/><rect x="14" y="4" width="6" height="6" rx="1.3"/><rect x="4" y="14" width="6" height="6" rx="1.3"/><rect x="14" y="14" width="6" height="6" rx="1.3"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M3 12h4l2.1-5 3.5 10 2.1-5H21"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="6" rx="1.5"/><rect x="4" y="14" width="16" height="6" rx="1.5"/><path d="M7 7h.1M7 17h.1M10 7h7M10 17h7"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="5.8"/><path d="m15.2 15.2 5 5"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3.5 19 6v5.2c0 4.4-2.8 7.9-7 9.3-4.2-1.4-7-4.9-7-9.3V6l7-2.5Z"/><path d="m8.8 12 2.1 2.1 4.6-4.6"/></symbol>
+    <symbol id="i-domain" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.8 12h16.4M12 3.5c2.1 2.3 3.1 5.1 3.1 8.5s-1 6.2-3.1 8.5c-2.1-2.3-3.1-5.1-3.1-8.5s1-6.2 3.1-8.5Z"/></symbol>
+    <symbol id="i-note" viewBox="0 0 24 24"><path d="M5 4.5h14v15H5z"/><path d="M8 8h8M8 12h8M8 16h4"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12 8.1a3.9 3.9 0 1 0 0 7.8 3.9 3.9 0 0 0 0-7.8Z"/><path d="m19.4 13.5 1.4 1.1-1.8 3.1-1.7-.7a7.9 7.9 0 0 1-1.9 1.1l-.3 1.8h-3.6l-.3-1.8a7.9 7.9 0 0 1-1.9-1.1l-1.7.7-1.8-3.1 1.4-1.1a7 7 0 0 1 0-3l-1.4-1.1 1.8-3.1 1.7.7a7.9 7.9 0 0 1 1.9-1.1l.3-1.8h3.6l.3 1.8a7.9 7.9 0 0 1 1.9 1.1l1.7-.7 1.8 3.1-1.4 1.1a7 7 0 0 1 0 3Z"/></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="m12 3 1.4 6.6L20 12l-6.6 1.4L12 20l-1.4-6.6L4 12l6.6-2.4L12 3Z"/></symbol><symbol id="i-music" viewBox="0 0 24 24"><path d="M9 18V5l10-2v13"/><circle cx="6.5" cy="18" r="3"/><circle cx="16.5" cy="16" r="3"/></symbol><symbol id="i-volume" viewBox="0 0 24 24"><path d="M4 10v4h3l5 4V6l-5 4H4Z"/><path d="M16 9.5c1.6 1.3 1.6 3.7 0 5M18.5 7c3.4 2.7 3.4 7.3 0 10"/></symbol>
+  </svg>
+  <div class="decoration-layer" id="decorationLayer" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div><canvas id="decorationCanvas" aria-hidden="true"></canvas>
+  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div><div class="ambient ambient-three"></div>
+  <div class="page-shell">
+    <header class="app-header">
+      <a class="brand" href="/" aria-label="返回状态页">
+        <div class="brand-mark" id="brandMark"><svg><use href="#i-galaxy"></use></svg></div>
+        <div><span class="brand-kicker">服务状态中心</span><h1 id="siteName">Status姬</h1><p id="siteDescription">网站、接口与服务器运行情况</p></div>
+      </a>
+      <div class="top-tools">
+        <div class="tool-pill" aria-label="页面导航">
+          <button class="icon-button active" data-view="services" title="服务"><svg><use href="#i-grid"></use></svg></button>
+          <button class="icon-button" data-view="events" title="事件"><svg><use href="#i-pulse"></use></svg></button>
+          <button class="icon-button" data-view="about" title="项目介绍"><svg><use href="#i-note"></use></svg></button>
+          <span class="tool-divider"></span>
+          <button class="icon-button" id="decorToggle" title="切换装饰"><svg><use href="#i-spark"></use></svg></button>
+        </div>
+      </div>
+    </header>
+    <main class="page-content">
+      <div class="workspace-grid">
+        <div class="main-column">
+          <div class="search-strip"><div class="search-orb"><svg><use href="#i-search"></use></svg></div><span>搜索服务名称、地址或状态…</span><kbd>Ctrl K</kbd><b>搜索</b></div>
+          <section class="footprint-card glass" id="overallCard">
+            <div class="footprint-summary">
+              <span class="eyebrow">运行总览</span>
+              <div class="title-line"><h2 id="overallTitle">等待检查结果</h2><span class="overall-icon partial" id="overallIcon">·</span></div>
+              <p id="overallSub">正在获取服务数据…</p>
+              <div class="footprint-stats"><div><strong id="summaryText">—</strong><span title="保留期内真实检查记录的成功比例">历史检查成功率</span></div><div><strong id="footprintTotal">—</strong><span>监控服务</span></div><div><strong id="footprintLatest">—</strong><span>最近响应</span></div></div>
+            </div>
+            <div class="footprint-map"><div class="month-row"><span id="historyDaysLabel">最近 7 天记录</span><b id="lastUpdated">等待更新</b></div><div class="heatmap" id="statusFootprint"></div><div class="heatmap-legend"><span>较早</span><i></i><i></i><i></i><i></i><b>最近</b></div></div>
+            <div class="refresh-countdown" id="refreshCountdown">下次检查 --:--</div>
+          </section>
+          <div class="section-meta"><div><span class="micro-label">服务分类</span><span class="section-date" id="refreshMinutes">5</span><span class="section-date">分钟自动检查</span></div><div class="category-tabs" id="categoryTabs" aria-label="服务分类"></div></div>
+          <section class="service-section view-section" id="services"><div class="section-heading"><div><span class="eyebrow">监控服务</span><h2>全部服务</h2></div></div><div id="serviceGroups" class="service-groups"></div></section>
+          <section class="events-section view-section" id="eventsSection" hidden><div class="section-heading"><div><span class="eyebrow">状态变化</span><h2>事件记录</h2><p>每次故障、恢复时间与持续时长都会保留在这里。</p></div><span class="section-date">按时间倒序</span></div><div id="incidentList" class="events-list glass"></div></section>
+          <section class="about-section view-section" id="aboutSection" hidden><div class="section-heading"><div><span class="eyebrow">项目介绍</span><h2>一份可以持续完善的开源状态中心</h2></div></div><div class="about-hero glass"><div class="about-project-mark"><svg><use href="#i-galaxy"></use></svg></div><div class="about-hero-copy"><span class="micro-label">开源项目说明</span><h3>Status姬</h3><p>面向个人服务器与小型团队的服务可用性轮询检查系统。把网站、接口、服务器资源、域名和证书提醒放在一个轻量、清晰、可扩展的状态页里。</p><div class="about-badges"><span>状态监控</span><span>风险提醒</span><span>接口扩展</span><span>玻璃化界面</span></div></div><div class="about-repository"><span>开源地址</span><strong><a href="https://github.com/futao-awa/Status-Girl" target="_blank" rel="noopener noreferrer">futao-awa/Status-Girl ↗</a></strong><small>查看源码、版本与使用文档</small></div></div><div class="about-grid about-feature-grid"><article class="about-card glass"><span class="about-icon">✦</span><h3>自动巡检</h3><p>网站、API 与 TCP 服务按设定间隔检查，保留最近结果、响应耗时和状态变化。</p></article><article class="about-card glass"><span class="about-icon">⌁</span><h3>风险提醒</h3><p>集中查看 SSL 证书、域名到期、异常事件和服务器资源占用，方便接入 QQBot 或其他通知渠道。</p></article><article class="about-card glass"><span class="about-icon">◌</span><h3>轻量状态页</h3><p>无需复杂前端工程即可部署，随机壁纸、动态装饰和紧凑布局让信息更适合长期使用。</p></article></div><div class="about-details"><article class="about-readme glass"><div class="about-detail-heading"><span class="micro-label">项目简介</span><h3>为什么做它</h3></div><p>当服务器上运行着多个网站、接口和服务时，逐个打开页面确认状态既慢又容易漏掉异常。本项目通过统一轮询、可视化记录和简单 API，把“服务是否正常”变成一眼就能看懂的信息。</p><div class="about-list"><div><b>01</b><span>统一监控网站、接口与 TCP 服务</span></div><div><b>02</b><span>记录异常、恢复与响应耗时</span></div><div><b>03</b><span>为机器人、脚本和面板提供查询接口</span></div></div></article><article class="about-readme glass"><div class="about-detail-heading"><span class="micro-label">技术结构</span><h3>部署与扩展</h3></div><div class="about-stack"><span>Node.js</span><span>Express</span><span>JSON 存储</span><span>原生前端</span><span>宝塔面板</span></div><p>后端负责轮询和数据存储，前端保持无构建依赖的静态资源结构。可以继续扩展通知渠道、更多检查类型、权限策略和统计报表。</p><div class="about-meta-row"><span>许可证</span><b>MIT</b><span>版本</span><b>1.0.0</b></div></article></div><div class="about-note glass"><span>✧</span><p>Status姬 v1.0.0 以 MIT 协议开源。欢迎在 GitHub 交流想法，一起完善这份状态中心。</p></div></section>
+        </div>
+        <aside class="system-sidebar view-section" id="systemSidebar">
+          <div class="sidebar-caption"><span>固定信息</span><i></i></div>
+          <article class="mini-widget glass"><div class="mini-head"><span class="micro-label">服务器资源</span><span class="widget-symbol"><svg><use href="#i-server"></use></svg></span></div><strong id="serverPlatform">加载中</strong><div class="meter-line"><span>内存</span><b id="memoryPct">—</b></div><div class="meter"><i id="memoryBar"></i></div><div class="meter-line"><span>磁盘</span><b id="diskPct">—</b></div><div class="meter"><i id="diskBar"></i></div></article>
+          <article class="mini-widget glass"><div class="mini-head"><span class="micro-label">域名到期</span><span class="widget-symbol"><svg><use href="#i-domain"></use></svg></span></div><div id="domainList" class="domain-list"><span class="muted">暂无域名记录</span></div></article>
+          <article class="mini-widget glass announcement-widget"><div class="mini-head"><span class="micro-label">公告</span><span class="widget-symbol"><svg><use href="#i-note"></use></svg></span></div><p id="announcementMirror">监控系统会在服务状态变化时记录事件并发送通知。</p></article>
+        </aside>
+      </div>
+      <footer class="footer"><span><b id="footerBrand">Status姬</b> · 服务状态一目了然</span><span><span id="footerStatus">自动轮询中</span> · 更新时间 <span id="footerTime">—</span></span></footer>
+    </main>
+  </div>
+  <div class="decoration-dock glass" id="decorationDock"><span class="dock-label">装饰</span><button class="decor-option" data-decor="paper" title="纸张飘落">▱</button><button class="decor-option active" data-decor="snow" title="日常落雪">❄</button></div>
+  <section class="music-player glass" id="musicPlayer" aria-label="平台音乐播放器"><div class="music-controls"><button class="music-control" id="musicPrev" type="button" title="上一首" aria-label="上一首">‹</button><button class="music-play" id="musicToggle" type="button" aria-label="播放音乐"><svg><use href="#i-music"></use></svg></button><button class="music-control" id="musicNext" type="button" title="下一首" aria-label="下一首">›</button></div><div class="music-main"><div class="music-topline"><span id="musicProviderMini">平台</span><strong id="musicTitle">等待后台歌单</strong></div><div class="music-progress"><i id="musicProgressFill"></i><input id="musicSeek" type="range" min="0" max="1000" step="1" value="0" aria-label="播放进度" disabled></div><small><span id="musicState">请在后台连接音乐平台</span><span class="music-time" id="musicTime">00:00 / 00:00</span></small></div><div class="music-extra-controls"><button class="music-control" id="musicRandom" type="button" title="随机播放" aria-label="随机播放">⤨</button><button class="music-control" id="musicRepeat" type="button" title="循环播放" aria-label="循环播放">↻</button><button class="music-volume-button" id="musicVolumeToggle" type="button" aria-label="音量" title="音量"><svg><use href="#i-volume"></use></svg></button></div><div class="music-volume-popover" id="musicVolumePopover"><input id="musicVolume" type="range" min="0" max="1" step="0.01" value="0.28" aria-label="音量"></div></section>
+  <div class="service-modal-backdrop" id="serviceModal" hidden aria-hidden="true"><div class="service-modal" role="dialog" aria-modal="true" aria-labelledby="serviceModalContent"><div id="serviceModalContent"></div></div></div>
+  <script src="/assets/decorations.js?v=20261121p" defer></script><script src="/assets/music.js?v=20261121p" defer></script><script src="/assets/appearance.js?v=20261121p"></script>
+  <script src="/assets/app.js?v=20261121p" defer></script>
+</body>
+</html>

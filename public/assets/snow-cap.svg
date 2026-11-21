@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="32" viewBox="0 0 480 32" preserveAspectRatio="none">
+  <defs><linearGradient id="snow" x2="0" y2="1"><stop stop-color="#fff"/><stop offset=".65" stop-color="#f7fcff"/><stop offset="1" stop-color="#d7eaf6"/></linearGradient></defs>
+  <path d="M0 12C12 12 17 5 29 6S46 12 58 8 74 2 87 5 102 10 115 7 137 5 151 8 172 4 186 6 203 11 218 7 238 3 254 6 275 10 292 7 317 4 330 7 350 4 368 7 387 10 402 6 424 4 440 8 464 5 480 10V18C467 20 459 16 448 18S430 23 415 20 397 18 384 21 360 18 348 19 330 24 315 21 298 18 283 20 265 21 252 18 234 20 222 22 203 18 190 19 171 24 158 20 142 17 131 20 111 20 99 17 82 21 69 19 52 17 40 20 17 17 0 19Z" fill="#aacfe5" opacity=".28" transform="translate(0 2)"/>
+  <path d="M0 10C12 10 17 3 29 4S46 10 58 6 74 0 87 3 102 8 115 5 137 3 151 6 172 2 186 4 203 9 218 5 238 1 254 4 275 8 292 5 317 2 330 5 350 2 368 5 387 8 402 4 424 2 440 6 464 3 480 8V16C467 18 459 14 448 16S430 21 415 18 397 16 384 19 360 16 348 17 330 22 315 19 298 16 283 18 265 19 252 16 234 18 222 20 203 16 190 17 171 22 158 18 142 15 131 18 111 18 99 15 82 19 69 17 52 15 40 18 17 15 0 17Z" fill="url(#snow)"/>
+  <path d="M52 7Q66 3 78 5M230 5Q240 2 250 5M344 5Q355 3 367 5" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="111" cy="25" r="1.6" fill="#fff"/><circle cx="305" cy="25" r="1.1" fill="#f7fcff"/><circle cx="435" cy="26" r="1.7" fill="#fff"/>
+</svg>

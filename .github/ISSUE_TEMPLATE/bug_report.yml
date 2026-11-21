@@ -1,0 +1,26 @@
+name: 🩹 出了一点小状况
+description: 帮 Status姬定位一个可以复现的问题
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: 请勿上传真实 Token、Cookie、密码、数据库或未脱敏的服务地址。
+  - type: input
+    id: version
+    attributes:
+      label: 版本与运行环境
+      placeholder: v1.0.0 / Node.js 24 / Linux / Chrome
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 怎样遇到这个问题？
+      description: 写下复现步骤、预期结果和实际表现。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 截图与日志
+      description: 可选，请先遮挡个人信息与凭据。

@@ -1,0 +1,992 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Status姬 API",
+    "version": "1.0.0",
+    "description": "面向机器人、脚本与外部系统的只读查询接口。除健康检查外，使用 Bearer Token 或 X-API-Key 鉴权。\n\n在后台生成只读 API Token，通过 Authorization: Bearer 或 X-API-Key 请求头传入。\n\n响应时间采用 ISO 8601 UTC；latency 和 durationMs 单位为毫秒，uptime 单位为秒。示例数据仅用于说明结构，不代表当前监控结果。\n\n每 IP 每分钟最多 120 次请求，建议每 30–60 秒轮询，网络错误与 5xx 时退避重试。",
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/license/mit"
+    },
+    "contact": {
+      "name": "Status姬 · GitHub",
+      "url": "https://github.com/futao-awa/Status-Girl/issues"
+    }
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "当前部署站点"
+    }
+  ],
+  "tags": [
+    {
+      "name": "服务状态",
+      "description": "健康检查、全部服务及单个服务的状态。"
+    },
+    {
+      "name": "事件与告警",
+      "description": "故障、恢复与当前临期风险。"
+    }
+  ],
+  "security": [
+    {
+      "BearerAuth": []
+    },
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "operationId": "getHealth",
+        "tags": [
+          "服务状态"
+        ],
+        "summary": "检查本服务健康状态",
+        "description": "无需 Token。仅表示监控服务进程可以响应，不代表所有被监控目标正常。",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "服务在线",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                },
+                "example": {
+                  "ok": true,
+                  "service": "status-girl",
+                  "uptime": 123.4,
+                  "now": "2026-11-21T08:00:00.000Z"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "同一 IP 每分钟超过 120 次请求（v1 全部接口合计），按 Retry-After 退避。响应可能为纯文本。",
+            "headers": {
+              "Retry-After": {
+                "description": "建议等待秒数",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "服务器内部错误"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/status": {
+      "get": {
+        "operationId": "getStatus",
+        "tags": [
+          "服务状态"
+        ],
+        "summary": "查询全部服务状态",
+        "description": "返回已启用并公开的服务、分类及域名记录。未检查的服务状态为 unknown，历史与最新检查字段可能不存在。",
+        "responses": {
+          "200": {
+            "description": "服务状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                },
+                "example": {
+                  "generatedAt": "2026-11-21T08:00:00.000Z",
+                  "summary": {
+                    "overall": "partial",
+                    "total": 0,
+                    "up": 0,
+                    "down": 0,
+                    "checked": 0,
+                    "checkedAt": null
+                  },
+                  "categories": [],
+                  "domains": []
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "缺少或无效 Token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "缺少有效 API Token",
+                  "code": "API_TOKEN_REQUIRED"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "同一 IP 每分钟超过 120 次请求（v1 全部接口合计），按 Retry-After 退避。响应可能为纯文本。",
+            "headers": {
+              "Retry-After": {
+                "description": "建议等待秒数",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "服务器内部错误"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/status/{id}": {
+      "get": {
+        "operationId": "getMonitorStatus",
+        "tags": [
+          "服务状态"
+        ],
+        "summary": "查询单个服务状态",
+        "description": "先调用全部状态接口，从 categories[].monitors[].id 获取服务 ID。只可查询已启用公开的服务。",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "监控服务 ID，不能使用服务名称或网址代替。",
+            "schema": {
+              "type": "string"
+            },
+            "example": "MONITOR_ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "目标服务状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MonitorResponse"
+                },
+                "example": {
+                  "generatedAt": "2026-11-21T08:00:00.000Z",
+                  "monitor": {
+                    "id": "MONITOR_ID",
+                    "name": "示例服务",
+                    "url": "https://example.com",
+                    "type": "http",
+                    "status": "unknown"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "缺少或无效 Token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "缺少有效 API Token",
+                  "code": "API_TOKEN_REQUIRED"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "服务不存在或未启用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "服务不存在",
+                  "code": "MONITOR_NOT_FOUND"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "同一 IP 每分钟超过 120 次请求（v1 全部接口合计），按 Retry-After 退避。响应可能为纯文本。",
+            "headers": {
+              "Retry-After": {
+                "description": "建议等待秒数",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "服务器内部错误"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "operationId": "getEvents",
+        "tags": [
+          "事件与告警"
+        ],
+        "summary": "查询故障与恢复事件",
+        "description": "按 createdAt 从新到旧返回事件。最多检索最近 200 条记录，不提供分页游标，不能用于完整历史导出。since 是严格大于筛选。\n\n轮询时重叠查询一小段时间，按事件 ID 去重；达到 limit 时不要直接把水位跳到最新时间。无效 since 当前会被忽略。未恢复或未记录时长的 durationMs 为 null。",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "description": "仅返回发生时间严格晚于该时间的事件；省略则返回最近事件。",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "example": "2026-11-21T00:00:00Z"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "本次最多返回的事件数；超出范围将限制在 1–100。",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "example": 20
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "事件列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EventsResponse"
+                },
+                "example": {
+                  "generatedAt": "2026-11-21T08:00:00.000Z",
+                  "count": 1,
+                  "events": [
+                    {
+                      "id": "EVENT_ID",
+                      "monitorId": "MONITOR_ID",
+                      "monitorName": "示例服务",
+                      "status": "down",
+                      "error": "连接超时",
+                      "createdAt": "2026-11-21T08:00:00.000Z",
+                      "startedAt": "2026-11-21T08:00:00.000Z",
+                      "resolvedAt": null,
+                      "durationMs": null
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "缺少或无效 Token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "缺少有效 API Token",
+                  "code": "API_TOKEN_REQUIRED"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "同一 IP 每分钟超过 120 次请求（v1 全部接口合计），按 Retry-After 退避。响应可能为纯文本。",
+            "headers": {
+              "Retry-After": {
+                "description": "建议等待秒数",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "服务器内部错误"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/alerts": {
+      "get": {
+        "operationId": "getAlerts",
+        "tags": [
+          "事件与告警"
+        ],
+        "summary": "查询当前告警",
+        "description": "仅返回当前故障与达到提醒阈值的 SSL 证书、域名。不同类型的告警字段不同：service_down / ssl_expiring 包含 monitorId，domain_expiring 包含 domainId。",
+        "responses": {
+          "200": {
+            "description": "当前告警列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertsResponse"
+                },
+                "example": {
+                  "generatedAt": "2026-11-21T08:00:00.000Z",
+                  "count": 0,
+                  "alerts": []
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "缺少或无效 Token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "缺少有效 API Token",
+                  "code": "API_TOKEN_REQUIRED"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "同一 IP 每分钟超过 120 次请求（v1 全部接口合计），按 Retry-After 退避。响应可能为纯文本。",
+            "headers": {
+              "Retry-After": {
+                "description": "建议等待秒数",
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "服务内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": "服务器内部错误"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "在后台生成的完整 API Token；不加 Bearer 前缀。"
+      },
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "完整 API Token。与 BearerAuth 二选一即可。"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "可读错误说明"
+          },
+          "code": {
+            "type": "string",
+            "description": "稳定错误代码（部分错误提供）"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "description": "本服务进程可响应"
+          },
+          "service": {
+            "type": "string",
+            "description": "服务标识",
+            "example": "status-girl"
+          },
+          "uptime": {
+            "type": "number",
+            "description": "进程运行时间，单位秒"
+          },
+          "now": {
+            "type": "string",
+            "description": "服务器当前 UTC 时间",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "ok",
+          "service",
+          "uptime",
+          "now"
+        ]
+      },
+      "Summary": {
+        "type": "object",
+        "properties": {
+          "overall": {
+            "type": "string",
+            "description": "down：存在故障；up：所有服务均确认正常；partial：其他情况（包含没有服务）",
+            "enum": [
+              "up",
+              "down",
+              "partial"
+            ]
+          },
+          "total": {
+            "type": "integer",
+            "description": "启用服务总数"
+          },
+          "up": {
+            "type": "integer",
+            "description": "正常服务数"
+          },
+          "down": {
+            "type": "integer",
+            "description": "故障服务数"
+          },
+          "checked": {
+            "type": "integer",
+            "description": "已经检查的服务数"
+          },
+          "checkedAt": {
+            "type": "integer",
+            "description": "最新检查时间，Unix 毫秒；暂无检查时为 null",
+            "format": "int64",
+            "nullable": true
+          }
+        },
+        "required": [
+          "overall",
+          "total",
+          "up",
+          "down",
+          "checked",
+          "checkedAt"
+        ]
+      },
+      "HistoryPoint": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "description": "本次检查是否正常"
+          },
+          "checkedAt": {
+            "type": "string",
+            "description": "检查时间",
+            "format": "date-time"
+          },
+          "latency": {
+            "type": "integer",
+            "description": "响应耗时，毫秒",
+            "nullable": true
+          },
+          "statusCode": {
+            "type": "integer",
+            "description": "响应状态码，无法取得时为 0"
+          }
+        }
+      },
+      "Ssl": {
+        "type": "object",
+        "properties": {
+          "supported": {
+            "type": "boolean"
+          },
+          "valid": {
+            "type": "boolean"
+          },
+          "daysRemaining": {
+            "type": "integer",
+            "description": "剩余天数，负值为已过期",
+            "nullable": true
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "到期时间",
+            "format": "date-time",
+            "nullable": true
+          },
+          "issuer": {
+            "type": "string",
+            "description": "签发者"
+          },
+          "error": {
+            "type": "string",
+            "description": "检查错误说明"
+          }
+        }
+      },
+      "Monitor": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "监控服务 ID"
+          },
+          "name": {
+            "type": "string",
+            "description": "服务名称"
+          },
+          "url": {
+            "type": "string",
+            "description": "被监控地址"
+          },
+          "type": {
+            "type": "string",
+            "description": "检查类型",
+            "enum": [
+              "http",
+              "api",
+              "tcp"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "categoryId": {
+            "type": "string",
+            "description": "所属分类 ID"
+          },
+          "status": {
+            "type": "string",
+            "description": "当前状态",
+            "enum": [
+              "up",
+              "down",
+              "unknown"
+            ]
+          },
+          "checkedAt": {
+            "type": "string",
+            "description": "最近检查时间；尚未检查时字段不存在",
+            "format": "date-time"
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "latency": {
+            "type": "integer",
+            "description": "最近检查耗时，毫秒",
+            "nullable": true
+          },
+          "statusCode": {
+            "type": "integer",
+            "description": "最近响应状态码"
+          },
+          "error": {
+            "type": "string",
+            "description": "最近检查的错误说明"
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryPoint"
+            }
+          },
+          "ssl": {
+            "$ref": "#/components/schemas/Ssl"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "url",
+          "type",
+          "status"
+        ]
+      },
+      "Category": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "分类 ID"
+          },
+          "name": {
+            "type": "string",
+            "description": "分类名称"
+          },
+          "sort": {
+            "type": "integer",
+            "description": "排序值"
+          },
+          "monitors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Monitor"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "monitors"
+        ]
+      },
+      "Domain": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "域名记录 ID"
+          },
+          "domain": {
+            "type": "string",
+            "description": "域名"
+          },
+          "expiryDate": {
+            "type": "string",
+            "description": "到期日期",
+            "example": "2027-02-12"
+          },
+          "registrar": {
+            "type": "string",
+            "description": "注册商"
+          },
+          "daysRemaining": {
+            "type": "integer",
+            "description": "剩余天数，未配置到期日时为 null",
+            "nullable": true
+          }
+        }
+      },
+      "Incident": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "事件 ID，轮询时用于去重"
+          },
+          "monitorId": {
+            "type": "string",
+            "description": "关联服务 ID"
+          },
+          "monitorName": {
+            "type": "string",
+            "description": "关联服务名称"
+          },
+          "status": {
+            "type": "string",
+            "description": "down：故障发生；up：服务恢复",
+            "enum": [
+              "down",
+              "up"
+            ]
+          },
+          "error": {
+            "type": "string",
+            "description": "故障原因"
+          },
+          "createdAt": {
+            "type": "string",
+            "description": "事件发生时间",
+            "format": "date-time"
+          },
+          "startedAt": {
+            "type": "string",
+            "description": "对应故障开始时间",
+            "format": "date-time",
+            "nullable": true
+          },
+          "resolvedAt": {
+            "type": "string",
+            "description": "故障恢复时间，未恢复时为 null",
+            "format": "date-time",
+            "nullable": true
+          },
+          "durationMs": {
+            "type": "integer",
+            "description": "故障持续毫秒数；null 表示未恢复或未记录，0 是有效数值",
+            "format": "int64",
+            "nullable": true
+          }
+        },
+        "required": [
+          "id",
+          "monitorId",
+          "status",
+          "createdAt",
+          "durationMs"
+        ]
+      },
+      "Alert": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "description": "告警类型",
+            "enum": [
+              "service_down",
+              "ssl_expiring",
+              "domain_expiring"
+            ]
+          },
+          "severity": {
+            "type": "string",
+            "description": "严重级别",
+            "enum": [
+              "warning",
+              "critical"
+            ]
+          },
+          "monitorId": {
+            "type": "string",
+            "description": "服务／证书告警的服务 ID"
+          },
+          "domainId": {
+            "type": "string",
+            "description": "域名告警的记录 ID"
+          },
+          "name": {
+            "type": "string",
+            "description": "服务名称"
+          },
+          "url": {
+            "type": "string",
+            "description": "服务地址"
+          },
+          "domain": {
+            "type": "string",
+            "description": "域名"
+          },
+          "status": {
+            "type": "string",
+            "description": "服务状态"
+          },
+          "error": {
+            "type": "string",
+            "description": "错误说明"
+          },
+          "checkedAt": {
+            "type": "string",
+            "description": "最近检查时间",
+            "format": "date-time",
+            "nullable": true
+          },
+          "daysRemaining": {
+            "type": "integer",
+            "description": "临期告警的剩余天数"
+          },
+          "expiresAt": {
+            "type": "string",
+            "description": "证书到期时间",
+            "format": "date-time",
+            "nullable": true
+          },
+          "expiryDate": {
+            "type": "string",
+            "description": "域名到期日期",
+            "nullable": true
+          }
+        },
+        "required": [
+          "type",
+          "severity"
+        ]
+      },
+      "StatusResponse": {
+        "type": "object",
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "description": "响应生成时间",
+            "format": "date-time"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/Summary"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Category"
+            }
+          },
+          "domains": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Domain"
+            }
+          }
+        },
+        "required": [
+          "generatedAt",
+          "summary",
+          "categories",
+          "domains"
+        ]
+      },
+      "MonitorResponse": {
+        "type": "object",
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "description": "响应生成时间",
+            "format": "date-time"
+          },
+          "monitor": {
+            "$ref": "#/components/schemas/Monitor"
+          }
+        },
+        "required": [
+          "generatedAt",
+          "monitor"
+        ]
+      },
+      "EventsResponse": {
+        "type": "object",
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "description": "响应生成时间",
+            "format": "date-time"
+          },
+          "count": {
+            "type": "integer",
+            "description": "本次返回条数"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Incident"
+            }
+          }
+        },
+        "required": [
+          "generatedAt",
+          "count",
+          "events"
+        ]
+      },
+      "AlertsResponse": {
+        "type": "object",
+        "properties": {
+          "generatedAt": {
+            "type": "string",
+            "description": "响应生成时间",
+            "format": "date-time"
+          },
+          "count": {
+            "type": "integer",
+            "description": "当前告警数量"
+          },
+          "alerts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Alert"
+            }
+          }
+        },
+        "required": [
+          "generatedAt",
+          "count",
+          "alerts"
+        ]
+      }
+    }
+  }
+}

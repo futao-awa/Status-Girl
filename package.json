@@ -1,0 +1,40 @@
+{
+  "name": "status-girl",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Status姬：面向个人服务器与小型团队的轻量服务监控与状态页",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test tests/*.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.5.0",
+    "helmet": "^8.0.0",
+    "nodemailer": "^10.6.0",
+    "qrcode": "^1.5.4"
+  },
+  "license": "MIT",
+  "author": "futao-awa",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/futao-awa/Status-Girl.git"
+  },
+  "homepage": "https://github.com/futao-awa/Status-Girl#readme",
+  "bugs": {
+    "url": "https://github.com/futao-awa/Status-Girl/issues"
+  },
+  "keywords": [
+    "status-page",
+    "uptime-monitor",
+    "self-hosted",
+    "monitoring"
+  ]
+}

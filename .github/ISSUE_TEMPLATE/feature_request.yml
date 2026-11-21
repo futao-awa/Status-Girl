@@ -1,0 +1,16 @@
+name: 🌟 给值班室添点新东西
+description: 提一个改进体验或增加功能的想法
+title: "[Feature] "
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 你想解决什么问题？
+      description: 聊聊实际使用场景，以及现在遇到的不便。
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: 期待怎样的体验？
+      description: 有草图、示意截图或参考资料也可以一起附上。
