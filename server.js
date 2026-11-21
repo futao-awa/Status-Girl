@@ -14,6 +14,7 @@ import { loadDb, saveDb, id, now } from './src/store.js';
 import { appearanceSettings, validateAppearance } from './src/appearance.js';
 import { mergeCookies, normalizeQr, qrStatus, cookieValue } from './src/music-auth.js';
 import { checkMonitor, getServerMetrics, inspectSsl } from './src/checkers.js';
+import { changelogSection, chooseVersionedRelease, compareVersions, normalizeVersion } from './src/update-check.js';
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
@@ -22,6 +23,10 @@ const sessionSecret = process.env.SESSION_SECRET || crypto.randomBytes(32).toStr
 if (isProduction && !process.env.SESSION_SECRET) console.warn('SESSION_SECRET 未设置，已使用临时随机密钥；重启后会话会失效。');
 const sessions = new Map();
 const db = await loadDb();
+const packageInfo = JSON.parse(fsSync.readFileSync(path.resolve('package.json'), 'utf8'));
+const appVersion = normalizeVersion(process.env.APP_VERSION || packageInfo.version) || '0.0.0';
+const githubRepository = 'futao-awa/Status-Girl';
+const githubProjectUrl = `https://github.com/${githubRepository}`;
 
 app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy: false }));
@@ -54,7 +59,12 @@ const musicDeviceId = () => {
 function musicProvider() { return db.settings.music?.provider || process.env.MUSIC_PROVIDER || 'netease'; }
 function musicBaseUrl() { return String(process.env.MUSIC_API_BASE_URL || '').trim().replace(/\/$/, ''); }
 function musicConfigured() { return ['netease', 'qishui'].includes(musicProvider()); }
-function musicLoggedIn() { const music = db.settings.music || {}; return music.provider === 'qishui' ? Boolean(music.sessionId) : Boolean(music.cookie); }
+function musicLoggedIn() {
+  const music = db.settings.music || {};
+  const provider = music.provider || musicProvider();
+  if (provider === 'qishui') return Boolean(music.sessionId || cookieValue(music.cookie, 'sessionid') || cookieValue(music.cookie, 'sessionid_ss'));
+  return Boolean(cookieValue(music.cookie, 'MUSIC_U') || cookieValue(music.cookie, 'MUSIC_A'));
+}
 function musicSessionHeaders() {
   const music = db.settings.music || {};
   const headers = { accept: 'application/json', 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36' };
@@ -253,7 +263,8 @@ function cleanMonitor(input, existing = {}) {
   const url = String(input.url ?? existing.url ?? '').trim();
   if (!url || url.length > 2048) throw new Error('请输入有效的监控地址');
   if (type !== 'tcp' && !/^https?:\/\//i.test(url)) throw new Error('HTTP/API 地址必须以 http:// 或 https:// 开头');
-  return { ...existing, id: existing.id || id(), name: String(input.name ?? existing.name ?? '未命名服务').trim().slice(0, 100), url, type, method: String(input.method ?? existing.method ?? 'GET').toUpperCase().slice(0, 10), expectedStatus: Number(input.expectedStatus ?? existing.expectedStatus ?? 200), expectedText: String(input.expectedText ?? existing.expectedText ?? '').slice(0, 500), timeoutMs: Math.min(60000, Math.max(1000, Number(input.timeoutMs ?? existing.timeoutMs ?? 10000))), headers: typeof input.headers === 'object' && input.headers ? input.headers : (existing.headers || {}), body: String(input.body ?? existing.body ?? '').slice(0, 10000), categoryId: String(input.categoryId ?? existing.categoryId ?? ''), note: String(input.note ?? existing.note ?? '').slice(0, 500), enabled: input.enabled === undefined ? (existing.enabled ?? true) : Boolean(input.enabled), checkSsl: Boolean(input.checkSsl ?? existing.checkSsl ?? false), sslWarningDays: Math.max(1, Number(input.sslWarningDays ?? existing.sslWarningDays ?? db.settings.sslWarningDays ?? 30)), createdAt: existing.createdAt || now(), updatedAt: now() };
+  const sort = input.sort !== undefined ? Number(input.sort) : Number(existing.sort ?? db.monitors.length);
+  return { ...existing, id: existing.id || id(), name: String(input.name ?? existing.name ?? '未命名服务').trim().slice(0, 100), url, type, method: String(input.method ?? existing.method ?? 'GET').toUpperCase().slice(0, 10), expectedStatus: Number(input.expectedStatus ?? existing.expectedStatus ?? 200), expectedText: String(input.expectedText ?? existing.expectedText ?? '').slice(0, 500), timeoutMs: Math.min(60000, Math.max(1000, Number(input.timeoutMs ?? existing.timeoutMs ?? 10000))), headers: typeof input.headers === 'object' && input.headers ? input.headers : (existing.headers || {}), body: String(input.body ?? existing.body ?? '').slice(0, 10000), categoryId: String(input.categoryId ?? existing.categoryId ?? ''), sort: Number.isFinite(sort) ? sort : db.monitors.length, note: String(input.note ?? existing.note ?? '').slice(0, 500), enabled: input.enabled === undefined ? (existing.enabled ?? true) : Boolean(input.enabled), checkSsl: Boolean(input.checkSsl ?? existing.checkSsl ?? false), sslWarningDays: Math.max(1, Number(input.sslWarningDays ?? existing.sslWarningDays ?? db.settings.sslWarningDays ?? 30)), createdAt: existing.createdAt || now(), updatedAt: now() };
 }
 function cleanDomain(input, existing = {}) {
   const domain = String(input.domain ?? existing.domain ?? '').trim().toLowerCase();
@@ -286,8 +297,9 @@ function incidentViews(limit = 200) {
   return ordered.reverse().slice(0, limit);
 }
 function publicData() {
-  const categories = [...db.categories].sort((a, b) => a.sort - b.sort).map(category => ({ ...category, monitors: db.monitors.filter(m => m.enabled && m.categoryId === category.id).map(m => ({ ...m, headers: undefined, body: undefined, ...statusFor(m) })) }));
-  const uncategorized = db.monitors.filter(m => m.enabled && !db.categories.some(c => c.id === m.categoryId));
+  const monitorOrder = (left, right) => (Number(left.sort) || 0) - (Number(right.sort) || 0);
+  const categories = [...db.categories].sort((a, b) => a.sort - b.sort).map(category => ({ ...category, monitors: db.monitors.filter(m => m.enabled && m.categoryId === category.id).sort(monitorOrder).map(m => ({ ...m, headers: undefined, body: undefined, ...statusFor(m) })) }));
+  const uncategorized = db.monitors.filter(m => m.enabled && !db.categories.some(c => c.id === m.categoryId)).sort(monitorOrder);
   if (uncategorized.length) categories.push({ id: 'uncategorized', name: '其他服务', sort: 999, monitors: uncategorized.map(m => ({ ...m, headers: undefined, body: undefined, ...statusFor(m) })) });
   const monitors = categories.flatMap(c => c.monitors);
   const up = monitors.filter(m => m.status === 'up').length;
@@ -311,6 +323,57 @@ function apiAlertsData() {
   }
   for (const domain of data.domains) if (domain.daysRemaining !== null && domain.daysRemaining <= Number(db.settings.domainWarningDays || 30)) alerts.push({ type: 'domain_expiring', severity: domain.daysRemaining < 0 ? 'critical' : 'warning', domainId: domain.id, domain: domain.domain, daysRemaining: domain.daysRemaining, expiryDate: domain.expiryDate || null });
   return { generatedAt: now(), count: alerts.length, alerts };
+}
+
+let updateCheckCache = { expiresAt: 0, data: null };
+async function githubJson(pathname) {
+  const response = await fetch(`https://api.github.com/repos/${githubRepository}/${pathname}`, {
+    headers: { accept: 'application/vnd.github+json', 'user-agent': 'Status-Girl-update-check' },
+    signal: AbortSignal.timeout(8000)
+  });
+  if (!response.ok) throw new Error(`GitHub 返回 ${response.status}`);
+  return response.json();
+}
+async function githubText(tag, pathname) {
+  const response = await fetch(`https://raw.githubusercontent.com/${githubRepository}/${encodeURIComponent(tag)}/${pathname}`, { signal: AbortSignal.timeout(8000) });
+  if (!response.ok) throw new Error(`GitHub 文件返回 ${response.status}`);
+  return response.text();
+}
+async function checkGitHubUpdate() {
+  const base = { currentVersion: appVersion, latestVersion: appVersion, updateAvailable: false, title: '', body: '', publishedAt: '', releaseUrl: githubProjectUrl, tagUrl: githubProjectUrl, checkedAt: now() };
+  try {
+    const results = await Promise.allSettled([githubJson('releases?per_page=20'), githubJson('tags?per_page=20')]);
+    let candidate = null;
+    for (const result of results) {
+      if (result.status !== 'fulfilled' || !Array.isArray(result.value)) continue;
+      const found = chooseVersionedRelease(result.value);
+      if (found && (!candidate || compareVersions(found.version, candidate.version) > 0)) candidate = found;
+    }
+    if (!candidate) return { ...base, unavailable: true };
+    const entry = candidate.entry;
+    const tag = String(entry?.tag_name ?? entry?.name ?? candidate.version);
+    const tagUrl = `${githubProjectUrl}/tree/${encodeURIComponent(tag)}`;
+    const releaseUrl = String(entry?.html_url || tagUrl);
+    let body = String(entry?.body || '').trim();
+    if (!body) {
+      try {
+        body = changelogSection(await githubText(tag, 'CHANGELOG.md'), candidate.version);
+      } catch { /* 更新记录不可用时保留版本信息 */ }
+    }
+    return {
+      ...base,
+      latestVersion: candidate.version,
+      updateAvailable: compareVersions(candidate.version, appVersion) > 0,
+      title: String(entry?.name || `Status姬 v${candidate.version}`).slice(0, 180),
+      body: String(body || 'GitHub 已发布新版本，去看看这次为值班室带来了什么变化吧。').slice(0, 4000),
+      publishedAt: String(entry?.published_at || entry?.created_at || ''),
+      releaseUrl,
+      tagUrl,
+      source: entry?.html_url ? 'release' : 'tag'
+    };
+  } catch {
+    return { ...base, unavailable: true };
+  }
 }
 
 app.get('/api/health', (_req, res) => res.json({ ok: true, uptime: process.uptime(), now: now() }));
@@ -363,6 +426,7 @@ async function exchangeQishuiRedirect(flow, redirect) {
   for (let hop = 0; next && hop < 5; hop += 1) {
     const url = new URL(next, 'https://api.qishui.com');
     if (url.protocol !== 'https:' || !(url.hostname === 'qishui.com' || url.hostname.endsWith('.qishui.com')) || url.username || url.password) throw new Error('平台返回了无效登录跳转');
+    flow.sessionId ||= url.searchParams.get('sessionid') || url.searchParams.get('session_id') || url.searchParams.get('sessionid_ss') || '';
     const response = await fetch(url, { redirect: 'manual', headers: { cookie: flow.cookie || '', 'user-agent': musicSessionHeaders()['user-agent'] }, signal: AbortSignal.timeout(10000) });
     mergeSetCookies(response.headers, flow);
     next = response.status >= 300 && response.status < 400 ? response.headers.get('location') : '';
@@ -383,8 +447,9 @@ async function checkMusicQr(flow) {
   if (result.cookie) flow.cookie = mergeCookies(flow.cookie, result.cookie.split(';').map(value => value.trim()));
   if (result.status !== 'confirmed') return { status: result.status };
   if (flow.provider === 'qishui' && result.redirect) await exchangeQishuiRedirect(flow, result.redirect);
-  const sessionId = result.sessionId || cookieValue(flow.cookie, 'sessionid') || cookieValue(flow.cookie, 'sessionid_ss');
-  const credential = flow.provider === 'qishui' ? sessionId : cookieValue(flow.cookie, 'MUSIC_U');
+  flow.sessionId = result.sessionId || flow.sessionId || cookieValue(flow.cookie, 'sessionid') || cookieValue(flow.cookie, 'sessionid_ss') || '';
+  const sessionId = flow.sessionId;
+  const credential = flow.provider === 'qishui' ? sessionId : cookieValue(flow.cookie, 'MUSIC_U') || cookieValue(flow.cookie, 'MUSIC_A');
   if (!credential) return { status: 'scanned', message: '手机已确认，正在等待平台完成授权…' };
   if (flow.provider !== musicProvider() || flow.generation !== musicAuthGeneration) return { status: 'expired' };
   db.settings.music.cookie = flow.cookie;
@@ -583,11 +648,17 @@ app.post('/api/login', loginLimiter, async (req, res) => {
 app.post('/api/logout', (req, res) => { const token = String(req.cookies.pulse_session || '').split('.')[0]; if (token) sessions.delete(token); res.clearCookie('pulse_session'); res.json({ ok: true }); });
 
 app.get('/api/admin/me', requireAdmin, (req, res) => res.json({ username: req.user.username, mustChangePassword: Boolean(db.users.find(u => u.id === req.user.userId)?.mustChangePassword) }));
-app.get('/api/admin/state', requireAdmin, async (_req, res) => {
+app.get('/api/admin/state', requireAdmin, async (req, res) => {
   const settings = JSON.parse(JSON.stringify(db.settings));
   if (settings.smtp) settings.smtp.pass = settings.smtp.pass ? '••••••••' : '';
   if (settings.music) { settings.music.loggedIn = musicLoggedIn(); settings.music.cookie = ''; settings.music.sessionId = ''; }
-  res.json({ settings, categories: db.categories, monitors: db.monitors.map(m => ({ ...m, ...statusFor(m) })), domains: db.domains.map(d => ({ ...d, daysRemaining: d.expiryDate ? Math.ceil((new Date(`${d.expiryDate}T23:59:59`) - Date.now()) / 86400000) : null })), notifications: db.notifications.slice(-50).reverse(), incidents: incidentViews(50), metrics: await getServerMetrics(), apiToken: { configured: Boolean(db.settings.apiTokenHash), prefix: db.settings.apiTokenPrefix || '', createdAt: db.settings.apiTokenCreatedAt || '' } });
+  res.json({ admin: { username: req.user.username, mustChangePassword: Boolean(db.users.find(u => u.id === req.user.userId)?.mustChangePassword) }, settings, categories: db.categories, monitors: db.monitors.map(m => ({ ...m, ...statusFor(m) })), domains: db.domains.map(d => ({ ...d, daysRemaining: d.expiryDate ? Math.ceil((new Date(`${d.expiryDate}T23:59:59`) - Date.now()) / 86400000) : null })), notifications: db.notifications.slice(-50).reverse(), incidents: incidentViews(50), metrics: await getServerMetrics(), apiToken: { configured: Boolean(db.settings.apiTokenHash), prefix: db.settings.apiTokenPrefix || '', createdAt: db.settings.apiTokenCreatedAt || '' } });
+});
+app.get('/api/admin/update-check', requireAdmin, async (_req, res) => {
+  if (updateCheckCache.data && updateCheckCache.expiresAt > Date.now()) return res.json(updateCheckCache.data);
+  const data = await checkGitHubUpdate();
+  updateCheckCache = { data, expiresAt: Date.now() + (data.unavailable ? 2 : 10) * 60 * 1000 };
+  res.json(data);
 });
 app.get('/api/admin/api-token', requireAdmin, (_req, res) => res.json({ configured: Boolean(db.settings.apiTokenHash), prefix: db.settings.apiTokenPrefix || '', createdAt: db.settings.apiTokenCreatedAt || '' }));
 app.post('/api/admin/api-token', requireAdmin, async (_req, res) => { const token = createApiToken(); await saveDb(db); res.json({ ok: true, token, prefix: db.settings.apiTokenPrefix, createdAt: db.settings.apiTokenCreatedAt }); });
@@ -616,9 +687,41 @@ app.put('/api/admin/password', requireAdmin, async (req, res) => {
   const user = db.users.find(u => u.id === req.user.userId);
   user.passwordHash = await bcrypt.hash(password, 12); user.mustChangePassword = false; await saveDb(db); res.json({ ok: true });
 });
+app.put('/api/admin/account', requireAdmin, async (req, res) => {
+  const username = String(req.body?.username ?? '').trim();
+  if (!username || username.length > 64 || /[\u0000-\u001f\u007f]/.test(username)) return res.status(400).json({ error: '用户名不能为空且不能超过 64 个字符' });
+  const user = db.users.find((item) => item.id === req.user.userId);
+  if (!user) return res.status(404).json({ error: '管理员账号不存在' });
+  const duplicate = db.users.some((item) => item.id !== user.id && item.username.toLocaleLowerCase() === username.toLocaleLowerCase());
+  if (duplicate) return res.status(409).json({ error: '用户名已被占用' });
+  user.username = username;
+  req.user.username = username;
+  await saveDb(db);
+  res.json({ ok: true, username });
+});
 app.post('/api/admin/categories', requireAdmin, async (req, res) => { const category = { id: id(), name: String(req.body?.name || '').trim().slice(0, 80), sort: Number(req.body?.sort || db.categories.length) }; if (!category.name) return res.status(400).json({ error: '分类名称不能为空' }); db.categories.push(category); await saveDb(db); res.json(category); });
-app.put('/api/admin/categories/:id', requireAdmin, async (req, res) => { const c = db.categories.find(x => x.id === req.params.id); if (!c) return res.status(404).json({ error: '分类不存在' }); c.name = String(req.body?.name || c.name).trim().slice(0, 80); c.sort = Number(req.body?.sort ?? c.sort); await saveDb(db); res.json(c); });
 app.delete('/api/admin/categories/:id', requireAdmin, async (req, res) => { const i = db.categories.findIndex(x => x.id === req.params.id); if (i < 0) return res.status(404).json({ error: '分类不存在' }); db.monitors.forEach(m => { if (m.categoryId === req.params.id) m.categoryId = ''; }); db.categories.splice(i, 1); await saveDb(db); res.json({ ok: true }); });
+app.put('/api/admin/categories/order', requireAdmin, async (req, res) => {
+  const ids = Array.isArray(req.body?.categoryIds) ? req.body.categoryIds.map((value) => String(value)) : [];
+  if (ids.length !== db.categories.length || new Set(ids).size !== ids.length || ids.some((categoryId) => !db.categories.some((category) => category.id === categoryId))) return res.status(400).json({ error: '分类排序列表已变化，请刷新后重试' });
+  const positions = new Map(ids.map((categoryId, index) => [categoryId, index]));
+  db.categories.forEach((category) => { category.sort = positions.get(category.id); });
+  await saveDb(db);
+  res.json({ ok: true, categoryIds: ids });
+});
+app.put('/api/admin/categories/:id', requireAdmin, async (req, res) => { const c = db.categories.find(x => x.id === req.params.id); if (!c) return res.status(404).json({ error: '分类不存在' }); c.name = String(req.body?.name || c.name).trim().slice(0, 80); c.sort = Number(req.body?.sort ?? c.sort); await saveDb(db); res.json(c); });
+app.put('/api/admin/monitors/order', requireAdmin, async (req, res) => {
+  const categoryId = String(req.body?.categoryId || '');
+  if (categoryId && !db.categories.some((category) => category.id === categoryId)) return res.status(400).json({ error: '分类不存在' });
+  const ids = Array.isArray(req.body?.monitorIds) ? req.body.monitorIds.map((value) => String(value)) : [];
+  const validCategory = (monitor) => categoryId ? monitor.categoryId === categoryId : !db.categories.some((category) => category.id === monitor.categoryId);
+  const monitors = db.monitors.filter(validCategory);
+  if (ids.length !== monitors.length || new Set(ids).size !== ids.length || ids.some((monitorId) => !monitors.some((monitor) => monitor.id === monitorId))) return res.status(400).json({ error: '排序列表与当前分类不一致，请刷新后重试' });
+  const positions = new Map(ids.map((monitorId, index) => [monitorId, index]));
+  monitors.forEach((monitor) => { monitor.sort = positions.get(monitor.id); });
+  await saveDb(db);
+  res.json({ ok: true, categoryId, monitorIds: ids });
+});
 app.post('/api/admin/monitors', requireAdmin, async (req, res) => { try { const m = cleanMonitor(req.body || {}); db.monitors.push(m); await saveDb(db); runMonitor(m.id); res.json(m); } catch (e) { res.status(400).json({ error: e.message }); } });
 app.put('/api/admin/monitors/:id', requireAdmin, async (req, res) => { try { const i = db.monitors.findIndex(x => x.id === req.params.id); if (i < 0) return res.status(404).json({ error: '监控不存在' }); db.monitors[i] = cleanMonitor(req.body || {}, db.monitors[i]); await saveDb(db); if (db.monitors[i].enabled) runMonitor(db.monitors[i].id); res.json(db.monitors[i]); } catch (e) { res.status(400).json({ error: e.message }); } });
 app.delete('/api/admin/monitors/:id', requireAdmin, async (req, res) => { const i = db.monitors.findIndex(x => x.id === req.params.id); if (i < 0) return res.status(404).json({ error: '监控不存在' }); db.monitors.splice(i, 1); delete db.results[req.params.id]; await saveDb(db); res.json({ ok: true }); });

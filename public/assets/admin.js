@@ -2,6 +2,18 @@ let state = null;
 let musicQrTimer = 0;
 let musicQrGeneration = 0;
 let musicQueueSignature = '';
+let monitorDragId = '';
+let categoryDragId = '';
+let touchDragKind = '';
+let touchDragPointerId = null;
+let touchDragTimer = 0;
+let touchDragStartX = 0;
+let touchDragStartY = 0;
+let touchDragRow = null;
+let touchDragOrder = [];
+let sortSaving = false;
+let updateSnoozeUntil = 0;
+const updateIgnoreKey = 'status-girl-ignored-update';
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -25,6 +37,20 @@ const toast = (message, danger = false) => {
   window.clearTimeout(toast.timer);
   toast.timer = window.setTimeout(() => element.classList.remove('show'), 2800);
 };
+function closeUpdateNotice() { $('#updateNotice')?.classList.add('hidden'); updateSnoozeUntil = Date.now() + 60 * 60 * 1000; }
+function ignoredUpdateVersion() { try { return window.localStorage.getItem(updateIgnoreKey) || ''; } catch { return ''; } }
+function ignoreUpdateVersion(version) { try { window.localStorage.setItem(updateIgnoreKey, version); } catch { /* private browsing may deny storage */ } }
+function showUpdateNotice(update) {
+  if (!update?.updateAvailable || !update.latestVersion || ignoredUpdateVersion() === update.latestVersion || Date.now() < updateSnoozeUntil) return;
+  $('#updateNotice').dataset.version = update.latestVersion;
+  $('#updateNoticeVersion').textContent = `当前 v${update.currentVersion} · 最新 v${update.latestVersion}`;
+  $('#updateNoticeBody').textContent = update.body || '这次更新为值班室准备了一些新的变化。';
+  $('#updateNoticeLink').href = update.releaseUrl || update.tagUrl || 'https://github.com/futao-awa/Status-Girl/releases';
+  $('#updateNotice').classList.remove('hidden');
+}
+async function checkForUpdate() {
+  try { showUpdateNotice(await api('/api/admin/update-check')); } catch { /* GitHub 暂时不可用不打断后台 */ }
+}
 
 async function api(url, options = {}) {
   try {
@@ -48,6 +74,7 @@ async function api(url, options = {}) {
 }
 
 function showLogin() {
+  $('#updateNotice')?.classList.add('hidden');
   stopMusicQr();
   window.platformMusicPlayer?.audio.pause();
   $('#loginView')?.classList.remove('hidden');
@@ -99,6 +126,9 @@ function domainForm(domain = {}) {
 function passwordForm() {
   return `<h2>修改管理员密码</h2><p>建议使用至少 12 位、包含大小写字母与数字的强密码。</p><form id="passwordForm"><label>新密码<input name="password" type="password" minlength="12" required></label><label>再次输入<input name="confirm" type="password" minlength="12" required></label><div class="modal-actions"><button type="button" class="secondary" id="cancelModal">取消</button><button class="primary" type="submit">更新密码</button></div></form>`;
 }
+function usernameForm() {
+  return `<h2>修改管理员用户名</h2><p>用户名用于后台登录，修改后当前会话会继续保持有效。</p><form id="usernameForm"><label>新用户名<input name="username" minlength="1" maxlength="64" autocomplete="username" required value="${esc(state?.admin?.username || '')}"></label><div class="modal-actions"><button type="button" class="secondary" id="cancelModal">取消</button><button class="primary" type="submit">更新用户名</button></div></form>`;
+}
 
 function render() {
   if (!state) return;
@@ -111,8 +141,11 @@ function render() {
   $('#statDown').textContent = down;
   $('#statMemory').textContent = state.metrics ? `${state.metrics.memory.usedPercent}%` : '—';
   $('#statPlatform').textContent = state.metrics?.platform || '—';
+  if ($('#adminUsername')) $('#adminUsername').textContent = state.admin?.username || 'admin';
+  if ($('#adminAvatar')) $('#adminAvatar').textContent = (state.admin?.username || 'A').slice(0, 1).toUpperCase();
   $('#overviewList').innerHTML = monitors.slice(0, 8).map((monitor) => `<div class="mini-row"><i class="mini-dot ${monitor.status || 'unknown'}"></i><span>${esc(monitor.name)}</span><b class="${monitor.status || 'unknown'}">${monitor.status === 'up' ? '运营' : monitor.status === 'down' ? '异常' : '等待'}</b></div>`).join('') || '<div class="muted">暂无服务</div>';
   $('#incidentList').innerHTML = (state.incidents || []).slice(0, 7).map((incident) => `<div class="event-row"><i class="event-mark ${incident.status === 'up' ? 'up' : ''}"></i><div><strong>${esc(incident.monitorName)} · ${incident.status === 'up' ? '恢复正常' : '变为异常'}</strong><small>${formatDate(incident.createdAt)} · 故障持续 ${formatIncidentDuration(incident)}${incident.error ? ` · ${esc(incident.error)}` : ''}</small></div></div>`).join('') || '<div class="muted">暂无事件记录</div>';
+  renderMonitorCategoryFilter();
   renderMonitorTable();
   renderDomains();
   renderMetrics();
@@ -122,14 +155,79 @@ function render() {
   renderApiToken();
   $('#syncText').textContent = `刚刚同步 · ${formatDate(new Date().toISOString())}`;
 }
+function renderMonitorCategoryFilter() {
+  const select = $('#monitorCategoryFilter');
+  if (!select) return;
+  const current = select.value;
+  const options = (state?.categories || []).slice().sort((a, b) => a.sort - b.sort).map((category) => `<option value="${esc(category.id)}">${esc(category.name)}</option>`).join('');
+  select.innerHTML = `<option value="">全部分类</option>${options}<option value="__uncategorized">未分类</option>`;
+  if ([...select.options].some((option) => option.value === current)) select.value = current;
+}
 function renderMonitorTable() {
   const query = ($('#monitorSearch')?.value || '').toLowerCase();
   const filter = $('#monitorFilter')?.value || 'all';
-  const list = (state?.monitors || []).filter((monitor) => (!query || `${monitor.name} ${monitor.url}`.toLowerCase().includes(query)) && (filter === 'all' || (monitor.status || 'unknown') === filter));
-  $('#monitorTable').innerHTML = list.map((monitor) => `<tr><td>${esc(monitor.name)}<div class="table-sub">${esc(monitor.url)}${monitor.note ? ` · ${esc(monitor.note)}` : ''}</div></td><td>${monitor.type === 'tcp' ? 'TCP' : monitor.type === 'api' ? 'API' : 'HTTP'}</td><td><span class="pill ${monitor.status || 'unknown'}">● ${monitor.status === 'up' ? '运营中' : monitor.status === 'down' ? '异常' : '未检查'}</span></td><td>${monitor.latency ? `${monitor.latency} ms` : '—'}</td><td>${formatDate(monitor.checkedAt)}</td><td><div class="row-actions"><button class="icon-btn edit-monitor" data-id="${monitor.id}" title="编辑">✎</button><button class="icon-btn danger-btn delete-monitor" data-id="${monitor.id}" title="删除">×</button></div></td></tr>`).join('') || '<tr><td colspan="6" class="muted">没有符合条件的服务。</td></tr>';
+  const categoryFilter = $('#monitorCategoryFilter')?.value || '';
+  const isUncategorized = categoryFilter === '__uncategorized';
+  const sortable = Boolean(categoryFilter) && !query && filter === 'all';
+  const list = (state?.monitors || []).filter((monitor) => {
+    const inCategory = !categoryFilter || (isUncategorized ? !(state.categories || []).some((category) => category.id === monitor.categoryId) : monitor.categoryId === categoryFilter);
+    return inCategory && (!query || `${monitor.name} ${monitor.url}`.toLowerCase().includes(query)) && (filter === 'all' || (monitor.status || 'unknown') === filter);
+  }).slice().sort((left, right) => Number(left.sort || 0) - Number(right.sort || 0));
+  const hint = $('#monitorSortHint');
+  if (hint) hint.textContent = sortable ? '拖动左侧手柄调整当前分类顺序，公开状态页会同步更新。' : categoryFilter ? '清除搜索和状态筛选后即可拖动当前分类排序。' : '先选择一个分类，再拖动左侧手柄调整公开状态页顺序。';
+  $('#monitorTable').innerHTML = list.map((monitor) => `<tr data-monitor-id="${esc(monitor.id)}" draggable="${sortable}"><td class="drag-column"><span class="drag-handle" aria-label="拖动排序" title="拖动排序">⠿</span></td><td>${esc(monitor.name)}<div class="table-sub">${esc(monitor.url)}${monitor.note ? ` · ${esc(monitor.note)}` : ''}</div></td><td>${monitor.type === 'tcp' ? 'TCP' : monitor.type === 'api' ? 'API' : 'HTTP'}</td><td><span class="pill ${monitor.status || 'unknown'}">● ${monitor.status === 'up' ? '运营中' : monitor.status === 'down' ? '异常' : '未检查'}</span></td><td>${monitor.latency ? `${monitor.latency} ms` : '—'}</td><td>${formatDate(monitor.checkedAt)}</td><td><div class="row-actions"><button class="icon-btn edit-monitor" data-id="${monitor.id}" title="编辑">✎</button><button class="icon-btn danger-btn delete-monitor" data-id="${monitor.id}" title="删除">×</button></div></td></tr>`).join('') || '<tr><td colspan="7" class="muted">没有符合条件的服务。</td></tr>';
 }
 function renderCategories() {
-  $('#categoryList').innerHTML = (state?.categories || []).slice().sort((a, b) => a.sort - b.sort).map((category) => `<div class="category-row"><span>${esc(category.name)}</span><small>${(state.monitors || []).filter((monitor) => monitor.categoryId === category.id).length} 项服务</small><div class="row-actions"><button class="icon-btn edit-category" data-id="${category.id}">✎</button><button class="icon-btn danger-btn delete-category" data-id="${category.id}">×</button></div></div>`).join('') || '<div class="muted">暂无分类</div>';
+  $('#categoryList').innerHTML = (state?.categories || []).slice().sort((a, b) => a.sort - b.sort).map((category) => `<div class="category-row" data-category-id="${esc(category.id)}" draggable="true"><span class="category-drag-handle" title="按住后拖动排序" aria-label="按住后拖动分类">⠿</span><span class="category-name">${esc(category.name)}</span><small>${(state.monitors || []).filter((monitor) => monitor.categoryId === category.id).length} 项服务</small><div class="row-actions"><button class="icon-btn edit-category" data-id="${category.id}">✎</button><button class="icon-btn danger-btn delete-category" data-id="${category.id}">×</button></div></div>`).join('') || '<div class="muted">暂无分类</div>';
+}
+async function saveCategoryOrder() {
+  const ids = [...document.querySelectorAll('#categoryList .category-row')].map((row) => row.dataset.categoryId);
+  if (!ids.length) return;
+  const previous = state.categories.slice().sort((a, b) => a.sort - b.sort).map((category) => category.id);
+  if (ids.every((id, index) => id === previous[index])) return;
+  sortSaving = true;
+  try {
+    await api('/api/admin/categories/order', { method: 'PUT', body: JSON.stringify({ categoryIds: ids }) });
+    const positions = new Map(ids.map((id, index) => [id, index]));
+    state.categories.forEach((category) => { category.sort = positions.get(category.id) ?? category.sort; });
+    renderMonitorCategoryFilter();
+    toast('分类顺序已保存');
+  } catch (error) { renderCategories(); toast(error.message, true); }
+  finally { sortSaving = false; }
+}
+async function saveMonitorOrder() {
+  const categoryFilter = $('#monitorCategoryFilter')?.value || '';
+  if (!categoryFilter) return;
+  const categoryId = categoryFilter === '__uncategorized' ? '' : categoryFilter;
+  const ids = [...document.querySelectorAll('#monitorTable tr[data-monitor-id]')].map((row) => row.dataset.monitorId);
+  if (!ids.length) return;
+  const previous = state.monitors.filter((monitor) => ids.includes(monitor.id)).sort((a, b) => a.sort - b.sort).map((monitor) => monitor.id);
+  if (ids.every((id, index) => id === previous[index])) return;
+  sortSaving = true;
+  try {
+    await api('/api/admin/monitors/order', { method: 'PUT', body: JSON.stringify({ categoryId, monitorIds: ids }) });
+    const positions = new Map(ids.map((id, index) => [id, index]));
+    state.monitors.filter((monitor) => ids.includes(monitor.id)).forEach((monitor) => { monitor.sort = positions.get(monitor.id); });
+    toast('监控顺序已保存');
+  } catch (error) { renderMonitorTable(); toast(error.message, true); }
+  finally { sortSaving = false; }
+}
+function moveSortableRow(row, pointerY) {
+  const container = row.parentElement;
+  const rows = [...container.querySelectorAll(':scope > [data-monitor-id], :scope > [data-category-id]')].filter((item) => item !== row);
+  const before = rows.find((item) => pointerY < item.getBoundingClientRect().top + item.getBoundingClientRect().height / 2);
+  if (before) container.insertBefore(row, before); else container.append(row);
+}
+function clearTouchDrag() {
+  window.clearTimeout(touchDragTimer);
+  touchDragTimer = 0;
+  document.querySelectorAll('.dragging, .drop-target').forEach((row) => row.classList.remove('dragging', 'drop-target'));
+  touchDragKind = '';
+  touchDragPointerId = null;
+  touchDragStartX = 0;
+  touchDragStartY = 0;
+  touchDragRow = null;
+  touchDragOrder = [];
 }
 function renderDomains() {
   $('#domainAdminList').innerHTML = (state?.domains || []).map((domain) => { const days = domain.daysRemaining; const level = days == null ? '' : days < 0 || days <= 7 ? 'danger' : days <= 30 ? 'warn' : ''; return `<div class="resource-row"><div class="resource-main"><b>${esc(domain.domain)}</b><span>${esc(domain.registrar || '未设置注册商')} · 到期 ${esc(domain.expiryDate || '未设置')}</span></div><span class="resource-days ${level}">${days == null ? '未设置' : days < 0 ? '已过期' : `${days} 天`}</span><div class="row-actions"><button class="icon-btn edit-domain" data-id="${domain.id}">✎</button><button class="icon-btn danger-btn delete-domain" data-id="${domain.id}">×</button></div></div>`; }).join('') || '<div class="muted">暂无域名记录。</div>';
@@ -325,13 +423,21 @@ async function copyApiToken() {
   if (!value) return toast('没有可复制的 Token', true);
   try { await navigator.clipboard.writeText(value); toast('Token 已复制'); } catch { toast('复制失败，请手动复制', true); }
 }
-async function reload() { state = await api('/api/admin/state'); window.PageAppearance?.apply(state.settings); render(); renderApiDocs(); }
+async function reload() {
+  if (touchDragKind || monitorDragId || categoryDragId || sortSaving) return;
+  const data = await api('/api/admin/state');
+  if (touchDragKind || monitorDragId || categoryDragId || sortSaving) return;
+  state = data;
+  window.PageAppearance?.apply(state.settings);
+  render(); renderApiDocs();
+}
 async function init() {
   try {
     const me = await api('/api/admin/me');
     showApp();
     if (me.mustChangePassword) $('#forcePassword').classList.remove('hidden');
     await reload();
+    await checkForUpdate();
   } catch { showLogin(); }
 }
 function selectTab(tab) {
@@ -348,7 +454,7 @@ function selectTab(tab) {
 $('#loginForm').addEventListener('submit', async (event) => {
   event.preventDefault();
   $('#loginError').textContent = '';
-  try { const result = await api('/api/login', { method: 'POST', body: JSON.stringify({ username: $('#loginUser').value.trim(), password: $('#loginPass').value }) }); showApp(); if (result.mustChangePassword) $('#forcePassword').classList.remove('hidden'); await reload(); toast('登录成功'); } catch (error) { $('#loginError').textContent = error.message; }
+  try { const result = await api('/api/login', { method: 'POST', body: JSON.stringify({ username: $('#loginUser').value.trim(), password: $('#loginPass').value }) }); showApp(); if (result.mustChangePassword) $('#forcePassword').classList.remove('hidden'); await reload(); await checkForUpdate(); toast('登录成功'); } catch (error) { $('#loginError').textContent = error.message; }
 });
 $('#logoutBtn').addEventListener('click', async () => { try { await api('/api/logout', { method: 'POST', body: '{}' }); } finally { showLogin(); } });
 $('#checkNowBtn').addEventListener('click', async () => { const button = $('#checkNowBtn'); button.disabled = true; button.textContent = '检查中…'; try { await api('/api/admin/check-now', { method: 'POST', body: '{}' }); await reload(); toast('检查已完成'); } catch (error) { toast(error.message, true); } finally { button.disabled = false; button.textContent = '立即检查'; } });
@@ -356,6 +462,7 @@ $('#generateApiToken').addEventListener('click', generateApiToken);
 $('#copyApiToken').addEventListener('click', copyApiToken);
 $('#monitorSearch').addEventListener('input', renderMonitorTable);
 $('#monitorFilter').addEventListener('change', renderMonitorTable);
+$('#monitorCategoryFilter').addEventListener('change', renderMonitorTable);
 $('#musicProvider')?.addEventListener('change', changeMusicProvider);
 $('#musicQrButton')?.addEventListener('click', startMusicQr);
 $('#musicReloadPlaylists')?.addEventListener('click', loadMusicPlaylists);
@@ -367,12 +474,94 @@ $('#musicRandomToggle')?.addEventListener('click', toggleMusicRandom);
 $$('.nav-item').forEach((button) => button.addEventListener('click', () => selectTab(button.dataset.tab)));
 $$('[data-go]').forEach((button) => button.addEventListener('click', () => selectTab(button.dataset.go)));
 
+$('#updateNoticeLater')?.addEventListener('click', closeUpdateNotice);
+$('#updateNoticeClose')?.addEventListener('click', closeUpdateNotice);
+$('#updateNoticeIgnore')?.addEventListener('click', () => {
+  const version = $('#updateNotice')?.dataset.version;
+  if (version) ignoreUpdateVersion(version);
+  closeUpdateNotice();
+});
+
+document.addEventListener('dragstart', (event) => {
+  if (touchDragKind || sortSaving || event.target.closest('button, a')) { event.preventDefault(); return; }
+  const monitorRow = event.target.closest('#monitorTable tr[data-monitor-id][draggable="true"]');
+  if (monitorRow) { monitorDragId = monitorRow.dataset.monitorId; monitorRow.classList.add('dragging'); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', monitorDragId); return; }
+  const categoryRow = event.target.closest('#categoryList .category-row[draggable="true"]');
+  if (categoryRow) { categoryDragId = categoryRow.dataset.categoryId; categoryRow.classList.add('dragging'); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', categoryDragId); }
+});
+document.addEventListener('dragover', (event) => {
+  const monitorRow = event.target.closest('#monitorTable tr[data-monitor-id][draggable="true"]');
+  const categoryRow = event.target.closest('#categoryList .category-row[draggable="true"]');
+  const row = monitorRow || categoryRow;
+  if (!row) return;
+  if ((monitorRow && !monitorDragId) || (categoryRow && !categoryDragId)) return;
+  event.preventDefault();
+  document.querySelectorAll('.drop-target').forEach((item) => item.classList.remove('drop-target'));
+  if (row.dataset.monitorId !== monitorDragId && row.dataset.categoryId !== categoryDragId) row.classList.add('drop-target');
+  const dragging = document.querySelector('.dragging');
+  if (dragging && dragging.parentElement === row.parentElement) moveSortableRow(dragging, event.clientY);
+});
+document.addEventListener('drop', async (event) => {
+  if (monitorDragId) { event.preventDefault(); monitorDragId = ''; document.querySelectorAll('.dragging').forEach((row) => row.classList.remove('dragging')); await saveMonitorOrder(); return; }
+  if (categoryDragId) { event.preventDefault(); categoryDragId = ''; document.querySelectorAll('.dragging').forEach((row) => row.classList.remove('dragging')); await saveCategoryOrder(); }
+});
+document.addEventListener('dragend', () => {
+  const canceledMonitor = Boolean(monitorDragId);
+  const canceledCategory = Boolean(categoryDragId);
+  monitorDragId = ''; categoryDragId = '';
+  document.querySelectorAll('.dragging, .drop-target').forEach((row) => row.classList.remove('dragging', 'drop-target'));
+  if (canceledMonitor) renderMonitorTable();
+  if (canceledCategory) renderCategories();
+});
+document.addEventListener('touchstart', (event) => {
+  if (sortSaving || event.touches.length !== 1) { clearTouchDrag(); return; }
+  const handle = event.target.closest('.drag-handle, .category-drag-handle');
+  const categoryRow = event.target.closest('#categoryList .category-row[draggable="true"]');
+  const row = handle?.closest('[data-monitor-id], [data-category-id]') || categoryRow;
+  const isCategoryRow = Boolean(row?.dataset.categoryId);
+  if (!row || (row.dataset.monitorId && !handle) || (row.dataset.monitorId && row.getAttribute('draggable') !== 'true') || (isCategoryRow && event.target.closest('button, a'))) return;
+  const touch = event.changedTouches[0];
+  touchDragPointerId = touch.identifier;
+  touchDragKind = row.dataset.monitorId ? 'monitor' : 'category';
+  touchDragRow = row;
+  touchDragOrder = [...row.parentElement.children];
+  touchDragStartX = touch.clientX;
+  touchDragStartY = touch.clientY;
+  touchDragTimer = window.setTimeout(() => { row.classList.add('dragging'); navigator.vibrate?.(18); }, 450);
+}, { passive: true });
+document.addEventListener('touchmove', (event) => {
+  const touch = [...event.changedTouches].find((touch) => touch.identifier === touchDragPointerId);
+  if (!touch || !touchDragKind) return;
+  const dragging = touchDragRow;
+  if (!dragging?.classList.contains('dragging')) {
+    const moved = Math.hypot(touch.clientX - touchDragStartX, touch.clientY - touchDragStartY);
+    if (moved > 10) clearTouchDrag();
+    return;
+  }
+  event.preventDefault();
+  moveSortableRow(dragging, touch.clientY);
+}, { passive: false });
+document.addEventListener('touchend', async (event) => {
+  if (![...event.changedTouches].some((touch) => touch.identifier === touchDragPointerId) || !touchDragKind) return;
+  const started = touchDragRow?.classList.contains('dragging');
+  const kind = touchDragKind;
+  if (started) event.preventDefault();
+  clearTouchDrag();
+  if (started) { if (kind === 'monitor') await saveMonitorOrder(); else await saveCategoryOrder(); }
+}, { passive: false });
+document.addEventListener('touchcancel', () => {
+  if (touchDragRow?.parentElement) touchDragOrder.forEach((row) => touchDragRow.parentElement.append(row));
+  clearTouchDrag();
+});
+document.addEventListener('contextmenu', (event) => { if (touchDragRow?.classList.contains('dragging') && event.target.closest('.category-row, .drag-handle')) event.preventDefault(); });
+
 document.addEventListener('click', async (event) => {
   const target = event.target.closest('button, a');
   if (!target) return;
   if (target.id === 'modalClose' || target.id === 'cancelModal') return closeModal();
   if (target.id === 'addMonitorBtn') return openModal(monitorForm());
   if (target.id === 'addDomainBtn') return openModal(domainForm());
+  if (target.id === 'changeUsernameBtn') return openModal(usernameForm());
   if (target.id === 'changePasswordBtn' || target.id === 'forcePasswordBtn') return openModal(passwordForm());
   if (target.classList.contains('music-admin-playlist')) return chooseMusicPlaylist(target);
   if (target.classList.contains('music-search-result')) return addMusicTrack(target);
@@ -397,6 +586,7 @@ document.addEventListener('submit', async (event) => {
   if (form.id === 'categoryForm') { event.preventDefault(); const name = form.elements.name.value.trim(); if (!name) return; try { await api('/api/admin/categories', { method: 'POST', body: JSON.stringify({ name }) }); form.reset(); await reload(); toast('分类已添加'); } catch (error) { toast(error.message, true); } return; }
   if (form.id === 'monitorForm') { event.preventDefault(); const data = Object.fromEntries(new FormData(form)); data.enabled = form.elements.enabled.checked; data.checkSsl = form.elements.checkSsl.checked; try { data.headers = data.headers ? JSON.parse(data.headers) : {}; const id = form.dataset.id; await api(id ? `/api/admin/monitors/${id}` : '/api/admin/monitors', { method: id ? 'PUT' : 'POST', body: JSON.stringify(data) }); closeModal(); await reload(); toast('监控已保存'); } catch (error) { toast(error.message, true); } return; }
   if (form.id === 'domainForm') { event.preventDefault(); const data = Object.fromEntries(new FormData(form)); data.enabled = form.elements.enabled.checked; try { const id = form.dataset.id; await api(id ? `/api/admin/domains/${id}` : '/api/admin/domains', { method: id ? 'PUT' : 'POST', body: JSON.stringify(data) }); closeModal(); await reload(); toast('域名已保存'); } catch (error) { toast(error.message, true); } return; }
+  if (form.id === 'usernameForm') { event.preventDefault(); try { const result = await api('/api/admin/account', { method: 'PUT', body: JSON.stringify({ username: form.elements.username.value.trim() }) }); closeModal(); await reload(); toast(`用户名已更新为 ${result.username}`); } catch (error) { toast(error.message, true); } return; }
   if (form.id === 'passwordForm') { event.preventDefault(); if (form.elements.password.value !== form.elements.confirm.value) return toast('两次密码不一致', true); try { await api('/api/admin/password', { method: 'PUT', body: JSON.stringify({ password: form.elements.password.value }) }); closeModal(); $('#forcePassword').classList.add('hidden'); toast('密码已更新'); } catch (error) { toast(error.message, true); } return; }
   if (form.id === 'siteSettingsForm') { event.preventDefault(); const data = Object.fromEntries(new FormData(form)); data.publicMetrics = form.elements.publicMetrics.checked; data.refreshSeconds = Number(data.refreshSeconds); data.historyDays = Number(data.historyDays); data.domainWarningDays = Number(data.domainWarningDays); data.sslWarningDays = Number(data.sslWarningDays); for (const key of ['backgroundBlur', 'backgroundOpacity', 'surfaceOpacity']) data[key] = Number(data[key]); try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(data) }); delete form.dataset.dirty; await reload(); toast('页面设置已保存'); } catch (error) { toast(error.message, true); } return; }
   if (form.id === 'notifyForm') { event.preventDefault(); const data = { webhookUrl: form.elements.webhookUrl.value, smtp: { host: form.elements.smtpHost.value, port: Number(form.elements.smtpPort.value), user: form.elements.smtpUser.value, pass: form.elements.smtpPass.value, from: form.elements.smtpFrom.value, to: form.elements.smtpTo.value } }; try { await api('/api/admin/settings', { method: 'PUT', body: JSON.stringify(data) }); delete form.dataset.dirty; await reload(); toast('通知设置已保存'); } catch (error) { toast(error.message, true); } }
@@ -409,6 +599,7 @@ if (initialTab) selectTab(initialTab);
 fetch('/api/public', { signal: AbortSignal.timeout(10000), cache: 'no-store' }).then(response => response.json()).then(data => window.PageAppearance?.apply(data.settings)).catch(() => window.PageAppearance?.apply());
 init();
 window.setInterval(() => { if (!$('#adminApp').classList.contains('hidden')) reload().catch(() => {}); }, 30000);
+window.setInterval(() => { if (!$('#adminApp').classList.contains('hidden')) checkForUpdate(); }, 10 * 60 * 1000);
 
 function updateAppearanceLabels() {
   const form = $('#siteSettingsForm');

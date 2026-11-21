@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
+import express from 'express';
 import { test } from 'node:test';
 import { appearanceDefaults, validateAppearance } from '../src/appearance.js';
 import { mergeCookies, cookieValue, normalizeQr, qrStatus } from '../src/music-auth.js';
+import { changelogSection, chooseVersionedRelease, compareVersions, normalizeVersion } from '../src/update-check.js';
 const read = file => readFileSync(new URL('../' + file, import.meta.url), 'utf8');
 
 test('背景参数保留零值，拒绝危险地址和无效数值', () => {
@@ -29,11 +31,33 @@ test('汽水二维码优先原始图片与链接，并报告平台实际错误',
 
 test('扫码状态兼容原生与适配器，不混淆汽水等待、扫描和过期', () => {
   assert.equal(qrStatus('netease',{code:803,cookie:'MUSIC_U=test'}).status,'confirmed');
+  assert.equal(qrStatus('netease',{code:200,data:{code:803,cookie:'MUSIC_U=test'}}).status,'confirmed');
+  assert.equal(qrStatus('netease',{code:200,data:{code:802}}).status,'scanned');
   assert.equal(qrStatus('qishui',{data:{status:'new',error_code:0}}).status,'pending');
   assert.equal(qrStatus('qishui',{data:{status:'scanned'}}).status,'scanned');
   assert.equal(qrStatus('qishui',{data:{status:'confirmed',redirect_url:'https://api.qishui.com/finish'}}).status,'confirmed');
   assert.equal(qrStatus('qishui',{data:{status:2}},true).status,'confirmed');
+  assert.equal(qrStatus('qishui',{data:{status:2}}).status,'confirmed');
   assert.equal(qrStatus('qishui',{data:{status:3}},true).status,'expired');
+});
+
+test('版本比较兼容 v、release 前缀，并选择最高稳定标签', () => {
+  assert.equal(normalizeVersion('v1.2.3'), '1.2.3');
+  assert.equal(normalizeVersion('release-1.10.0'), '1.10.0');
+  assert.equal(compareVersions('1.10.0', '1.9.9'), 1);
+  assert.equal(normalizeVersion('2026-preview'), '');
+  assert.equal(normalizeVersion('v2.0.0-beta.1'), '');
+  assert.equal(chooseVersionedRelease([{tag_name:'v9.0.0',prerelease:true},{tag_name:'v8.0.0',draft:true},{name:'v1.2.0'}]).version,'1.2.0');
+  assert.equal(chooseVersionedRelease([{tag_name:'v1.0.0'}, {name:'v1.2.0'}, {name:'preview'}]).version, '1.2.0');
+});
+
+test('版本公告可以从 CHANGELOG 对应版本提取更新内容', () => {
+  const markdown = '# 更新记录\n\n## [1.0.1] - 2026-11-21\n\n- 修复扫码登录\n- 增加分类长按排序\n\n## [1.0.0] - 2026-11-21\n\n- 初次发布';
+  assert.match(changelogSection(markdown, 'v1.0.1'), /修复扫码登录/);
+  assert.doesNotMatch(changelogSection(markdown, '1.0.1'), /初次发布/);
+  assert.match(changelogSection(markdown.replaceAll('\n','\r\n'), '1.0.0'), /初次发布/);
+  assert.equal(changelogSection(markdown,'1.0.10'),'');
+  assert.doesNotMatch(changelogSection(read('CHANGELOG.md'),'1.0.1'), /\[1\.0\.1\]:/);
 });
 
 function qrBackend(payload, provider='netease') {
@@ -57,6 +81,16 @@ test('网易云确认后先持久化登录，再返回；资料查询不阻塞�
   assert.equal(fixture.saved(),1);
 });
 
+test('内层扫码确认及汽水会话凭据都能完成登录保存', async () => {
+  const netease = qrBackend({code:200,data:{code:803,cookie:'MUSIC_A=credential'}});
+  assert.equal((await netease.run()).loggedIn,true);
+  assert.equal(netease.saved(),1);
+  const qishui = qrBackend({data:{status:2,session_id:'fixture-session'}},'qishui');
+  assert.equal((await qishui.run()).loggedIn,true);
+  assert.equal(qishui.db.settings.music.sessionId,'fixture-session');
+  assert.equal(qishui.saved(),1);
+});
+
 test('未取得凭据不冒充登录；退出后的旧扫码响应不能重新登录', async () => {
   const incomplete=qrBackend({code:803});
   assert.equal((await incomplete.run()).status,'scanned');
@@ -65,6 +99,98 @@ test('未取得凭据不冒充登录；退出后的旧扫码响应不能重新�
   stale.context.musicAuthGeneration=1;
   assert.equal((await stale.run()).status,'expired');
   assert.equal(stale.db.settings.music.cookie,'');
+});
+
+test('后台账号接口可以修改当前用户名并拒绝重复账号', async () => {
+  const source = read('server.js'); let handler;
+  const db = { users: [{id:'a', username:'admin'}, {id:'b', username:'other'}] };
+  const context = vm.createContext({ db, requireAdmin(){}, saveDb:async()=>{}, app:{put:(path,_auth,fn)=>{if(path === '/api/admin/account') handler=fn;}} });
+  vm.runInContext(source.slice(source.indexOf("app.put('/api/admin/account'"), source.indexOf("app.post('/api/admin/categories'")), context);
+  const response = () => ({ status(code){this.code=code;return this;}, json(data){this.data=data;} });
+  const req = { user: {userId:'a', username:'admin'}, body:{username:'new-admin'} };
+  const first = response(); await handler(req, first);
+  assert.deepEqual(JSON.parse(JSON.stringify(first.data)), {ok:true, username:'new-admin'});
+  assert.equal(db.users[0].username, 'new-admin');
+  assert.equal(req.user.username, 'new-admin');
+  const duplicate = response(); await handler({user:{userId:'a',username:'new-admin'}, body:{username:'other'}}, duplicate);
+  assert.equal(duplicate.code, 409);
+});
+
+test('后台分类和监控排序接口只接受完整的当前列表', async () => {
+  const source = read('server.js'); const handlers = {};
+  const db = { categories:[{id:'a',sort:0},{id:'b',sort:1}], monitors:[{id:'m1',categoryId:'a',sort:0},{id:'m2',categoryId:'a',sort:1},{id:'m3',categoryId:'b',sort:0}] };
+  const context = vm.createContext({ db, requireAdmin(){}, saveDb:async()=>{}, app:{put:(path,_auth,fn)=>{handlers[path]=fn;}} });
+  vm.runInContext(source.slice(source.indexOf("app.put('/api/admin/categories/order'"), source.indexOf("app.post('/api/admin/monitors'")), context);
+  const response = () => ({ status(code){this.code=code;return this;}, json(data){this.data=data;} });
+  let res = response(); await handlers['/api/admin/categories/order']({body:{categoryIds:['b','a']}}, res);
+  assert.equal(db.categories[0].sort, 1); assert.equal(db.categories[1].sort, 0);
+  res = response(); await handlers['/api/admin/monitors/order']({body:{categoryId:'a',monitorIds:['m2','m1']}}, res);
+  assert.equal(db.monitors[0].sort, 1); assert.equal(db.monitors[1].sort, 0);
+  res = response(); await handlers['/api/admin/monitors/order']({body:{categoryId:'a',monitorIds:['m2']}}, res);
+  assert.equal(res.code, 400);
+});
+
+test('真实路由访问分类排序不会被编辑分类接口拦截', async () => {
+  const source=read('server.js');
+  const app=express(); app.use(express.json());
+  let saved=0;
+  const db={categories:[{id:'a',name:'A',sort:0},{id:'b',name:'B',sort:1}],monitors:[]};
+  const context=vm.createContext({app,db,requireAdmin:(_req,_res,next)=>next(),saveDb:async()=>saved++});
+  vm.runInContext(source.slice(source.indexOf("app.post('/api/admin/categories'"),source.indexOf("app.post('/api/admin/monitors'")),context);
+  const server=app.listen(0,'127.0.0.1');
+  await new Promise(resolve=>server.once('listening',resolve));
+  try {
+    const origin=`http://127.0.0.1:${server.address().port}`;
+    const response=await fetch(origin+'/api/admin/categories/order',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({categoryIds:['b','a']})});
+    assert.equal(response.status,200);
+    assert.deepEqual((await response.json()).categoryIds,['b','a']);
+    assert.equal(db.categories[0].sort,1); assert.equal(saved,1);
+    const invalid=await fetch(origin+'/api/admin/categories/order',{method:'PUT',headers:{'content-type':'application/json'},body:JSON.stringify({categoryIds:['a','a']})});
+    assert.equal(invalid.status,400); assert.equal(saved,1);
+  } finally { await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('只有新标签时也显示更新内容，旧 Release 和预览版本不遮挡它', async () => {
+  const source=read('server.js');
+  const context=vm.createContext({appVersion:'1.0.0',githubProjectUrl:'https://github.com/futao-awa/Status-Girl',now:()=>new Date().toISOString(),compareVersions,chooseVersionedRelease,changelogSection,
+    githubJson:async(path)=>path.startsWith('releases')?[{tag_name:'v1.0.0',html_url:'https://github.com/futao-awa/Status-Girl/releases/tag/v1.0.0'},{tag_name:'v3.0.0',prerelease:true}]:[{name:'v1.0.1'}],
+    githubText:async()=>read('CHANGELOG.md')});
+  vm.runInContext(source.slice(source.indexOf('async function checkGitHubUpdate('),source.indexOf("app.get('/api/health'")),context);
+  const update=await vm.runInContext('checkGitHubUpdate()',context);
+  assert.equal(update.updateAvailable,true); assert.equal(update.latestVersion,'1.0.1');
+  assert.match(update.body,/长按/); assert.match(update.tagUrl,/v1.0.1$/);
+  context.githubJson=async()=>{throw Error('offline');};
+  const offline=await vm.runInContext('checkGitHubUpdate()',context);
+  assert.equal(offline.unavailable,true); assert.equal(offline.updateAvailable,false);
+});
+
+test('分类长按后才开始拖动，松手保存，滑动或取消不误保存', async () => {
+  const source=read('public/assets/admin.js');
+  const handlers={}; const timers=new Map(); let timerId=0; let saved=0;
+  const container={children:[],querySelectorAll(){return this.children;},append(row){this.children=this.children.filter(item=>item!==row);this.children.push(row);},insertBefore(row,before){this.children=this.children.filter(item=>item!==row);this.children.splice(this.children.indexOf(before),0,row);}};
+  const rows=['a','b','c'].map(id=>({dataset:{categoryId:id},parentElement:container,classList:{values:new Set(),add(value){this.values.add(value);},remove(...values){values.forEach(value=>this.values.delete(value));},contains(value){return this.values.has(value);}},getBoundingClientRect(){return {top:container.children.indexOf(this)*50,height:50};}}));
+  container.children=rows.slice();
+  const target=(row,button=false)=>({closest(selector){if(selector==='button, a')return button?{}:null; if(selector.startsWith('#categoryList'))return row; return null;}});
+  const context=vm.createContext({touchDragKind:'',touchDragPointerId:null,touchDragTimer:0,touchDragStartX:0,touchDragStartY:0,touchDragRow:null,touchDragOrder:[],sortSaving:false,
+    document:{addEventListener:(name,fn)=>handlers[name]=fn,querySelectorAll:()=>rows},
+    window:{setTimeout(fn){timers.set(++timerId,fn);return timerId;},clearTimeout:id=>timers.delete(id)},navigator:{vibrate(){}},
+    saveCategoryOrder:async()=>saved++,saveMonitorOrder:async()=>assert.fail('unexpected monitor sort')});
+  vm.runInContext(source.slice(source.indexOf('function moveSortableRow('),source.indexOf('function renderDomains(')),context);
+  vm.runInContext(source.slice(source.indexOf("document.addEventListener('touchstart'"),source.indexOf("document.addEventListener('click'")),context);
+  const touch=(y=0)=>({identifier:1,clientX:10,clientY:y});
+  const event=(row,y=0,button=false)=>({target:target(row,button),touches:[touch(y)],changedTouches:[touch(y)],preventDefault(){this.prevented=true;}});
+  const start=event(rows[0]);handlers.touchstart(start);
+  assert.equal(rows[0].classList.contains('dragging'),false);
+  const timer=[...timers.values()][0];timer();
+  assert.equal(rows[0].classList.contains('dragging'),true);
+  const move=event(rows[0],149);handlers.touchmove(move);
+  assert.equal(move.prevented,true);assert.deepEqual(container.children.map(row=>row.dataset.categoryId),['b','c','a']);
+  await handlers.touchend(move);assert.equal(saved,1);
+  handlers.touchstart(event(rows[1]));handlers.touchmove(event(rows[1],30));
+  assert.equal(context.touchDragKind,''); await handlers.touchend(event(rows[1],30));assert.equal(saved,1);
+  handlers.touchstart(event(rows[1],0,true));assert.equal(context.touchDragKind,'');
+  handlers.touchstart(event(rows[1]));[...timers.values()][0]();handlers.touchmove(event(rows[1],200));handlers.touchcancel();
+  assert.deepEqual(container.children.map(row=>row.dataset.categoryId),['b','c','a']);assert.equal(saved,1);
 });
 
 test('背景保存验证失败不部分覆盖设置，成功响应不暴露敏感配置', async () => {

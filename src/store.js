@@ -81,7 +81,9 @@ function migrate(db) {
   db.settings.music.deviceId = String(db.settings.music.deviceId || '');
   db.users ??= [];
   db.categories ??= [];
+  db.categories.forEach((category, index) => { category.sort = Number.isFinite(Number(category.sort)) ? Number(category.sort) : index; });
   db.monitors ??= [];
+  db.monitors.forEach((monitor, index) => { monitor.sort = Number.isFinite(Number(monitor.sort)) ? Number(monitor.sort) : index; });
   db.domains ??= [];
   db.results ??= {};
   db.notifications ??= [];
