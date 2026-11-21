@@ -69,7 +69,7 @@ export function qrStatus(provider, payload) {
   const errorCode = Number(field(layers, ['error_code']));
   if (errorCode === 2) return { ...result, status: 'expired' };
   if (errorCode === 7 && !credential) return { ...result, status: 'retrying', retryAfterMs: 5000, message: '平台请求较频繁，5 秒后继续检查…' };
-  if (errorCode === 2046) return { ...result, status: 'verification_required', message: '平台要求额外身份验证，请在抖音 APP 完成验证后重新生成二维码。' };
+  if (errorCode === 2046 && !credential) return { ...result, status: 'verification_required', decision: layers.find(layer => layer.verify_from || layer.url || layer.verify_ways) || layers[0], message: '平台要求额外身份验证，请在后台验证窗口完成验证。' };
   if (!credential && (errorCode > 0 || layers.some(layer => layer.message === 'error'))) throw musicAuthError(provider, payload);
   const states = { new: 'pending', waiting: 'pending', pending: 'pending', '1': 'pending', scanned: 'scanned', scan: 'scanned', scanned_qrcode: 'scanned', '2': 'scanned', confirm: 'confirmed', confirmed: 'confirmed', success: 'confirmed', login: 'confirmed', confirmed_login: 'confirmed', '3': 'confirmed', expired: 'expired', expire: 'expired', invalid: 'expired', cancelled: 'expired', canceled: 'expired', '4': 'expired' };
   const status = credential ? 'confirmed' : states[value];

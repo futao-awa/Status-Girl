@@ -4,9 +4,9 @@
 
 **把服务器的小情绪，交给值班少女。**
 
-轻量、自部署的服务监控与状态页 · v1.0.2
+轻量、自部署的服务监控与状态页 · v1.0.3
 
-[![版本](https://img.shields.io/badge/version-1.0.2-8faed3)](https://github.com/futao-awa/Status-Girl/tree/v1.0.2)
+[![版本](https://img.shields.io/badge/version-1.0.3-8faed3)](https://github.com/futao-awa/Status-Girl/tree/v1.0.3)
 [![MIT](https://img.shields.io/badge/license-MIT-b8a1d9)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-8bbfa6)](https://nodejs.org/)
 [![Tests](https://github.com/futao-awa/Status-Girl/actions/workflows/test.yml/badge.svg)](https://github.com/futao-awa/Status-Girl/actions/workflows/test.yml)
@@ -129,7 +129,7 @@ npm start
 
 ## 🎵 音乐与外部服务
 
-在后台「音乐工作台」选择平台并扫码连接。网易云用网易云音乐 APP，汽水当前官方二维码提示用已登录的抖音 APP 验证身份。歌单为空时默认使用随机来源，也可以自己整理播放队列。`MUSIC_API_BASE_URL` 留空时使用内置直连；有兼容的自建音乐 API 时再填写其地址。连接说明与实现参考见 [音乐扫码连接](docs/MUSIC-AUTH.md)。
+在后台「音乐工作台」选择平台并扫码连接。网易云用网易云音乐 APP，汽水当前官方二维码提示用已登录的抖音 APP 验证身份。遇到额外身份验证时，按后台弹出的官方窗口完成验证即可继续授权。歌单为空时默认使用随机来源，也可以自己整理播放队列。`MUSIC_API_BASE_URL` 留空时使用内置直连；有兼容的自建音乐 API 时再填写其地址。连接说明与实现参考见 [音乐扫码连接](docs/MUSIC-AUTH.md)。
 
 音乐能否播放取决于平台登录、账号权限、地区和上游接口；浏览器也可能要求首次点击后才允许有声播放。后台试听只影响当前浏览器。Status姬不附带歌曲文件，也不绕过平台的播放限制。
 
@@ -153,7 +153,7 @@ curl -H "Authorization: Bearer YOUR_TOKEN" https://status.example.com/api/v1/sta
 npm test
 ```
 
-当前版本为 **1.0.2**，更新记录见 [CHANGELOG](CHANGELOG.md)，版本标签见 [Tags](https://github.com/futao-awa/Status-Girl/tags)。项目采用单实例 JSON 存储；大规模、多节点监控和集群部署暂不在本版本范围内。
+当前版本为 **1.0.3**，更新记录见 [CHANGELOG](CHANGELOG.md)，版本标签见 [Tags](https://github.com/futao-awa/Status-Girl/tags)。项目采用单实例 JSON 存储；大规模、多节点监控和集群部署暂不在本版本范围内。
 
 ## 📜 关于约定
 

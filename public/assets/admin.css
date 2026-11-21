@@ -151,6 +151,11 @@
 .api-doc-card:hover { transform: none; box-shadow: 0 8px 28px rgba(65,91,116,.055); }
 .modal { z-index: 40; background: rgba(52,72,90,.27); }
 .modal-card { border-radius: 26px; background: #f8fbfd; box-shadow: 0 22px 70px #344a6130; overscroll-behavior: contain; }
+.qishui-verification-dialog { position: fixed; inset: 0; z-index: 70; display: grid; place-items: center; padding: 16px; background: rgba(38,62,93,.42); overscroll-behavior: contain; }
+.qishui-verification-card { width: min(560px,100%); max-height: 94dvh; overflow: hidden; border: 1px solid rgba(255,255,255,.9); border-radius: 24px; background: #f8fbfd; box-shadow: 0 22px 70px #344a6150; }
+.qishui-verification-card header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 15px 18px; }
+.qishui-verification-card h2 { margin: 0; font-size: 16px; color: var(--admin-ink); }
+.qishui-verification-card iframe { display: block; width: 100%; height: min(620px,75dvh); border: 0; background: #fff; }
 .login-card { background: #ffffffeb; box-shadow: 0 22px 70px rgba(60,89,115,.12); animation: none; }
 .login-card .primary { padding-block: 14px; }
 .login-orbit { animation: none; }

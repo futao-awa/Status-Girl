@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | [api-enhanced](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced) · MIT | `login_qr_key`、`login_qr_check` 的 `type=3`，同一请求身份与 Cookie，账号资料使用 weapi POST | [`23d9e9d`](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced/tree/23d9e9d7ee5dfeccfc3b15916ccd9da1f76d3ea4) |
 | [guowenye/qishui-api](https://github.com/guowenye/qishui-api) · MIT | Passport 表单字段、创建二维码时的 Cookie、确认后的 Set-Cookie 与适配器 `auth.sessionid` | [`e409c10`](https://github.com/guowenye/qishui-api/tree/e409c10fe7441a10d370da7da61d62bbc1e5126c) |
-| [myedunote/meting-api](https://github.com/myedunote/meting-api) · 声明 MIT | PC Passport 参数、官方 BDMS 签名、请求追踪及授权 Cookie | [`d21ac70`](https://github.com/myedunote/meting-api/tree/d21ac706f96a84ff8baa659f7d21092416bdb897) |
+| [myedunote/meting-api](https://github.com/myedunote/meting-api) · 声明 MIT | PC Passport 参数、官方 BDMS 签名、请求追踪、授权 Cookie，以及二次验证决策和确认重发协议 | [`d21ac70`](https://github.com/myedunote/meting-api/tree/d21ac706f96a84ff8baa659f7d21092416bdb897) |
 
 汽水 Passport 请求使用 PC SDK `2.4.13 / normal` 参数，与歌曲接口的 `/luna/pc` 参数分开。创建和检查二维码共用设备、安装标识及 Cookie；显示官方原始二维码，保留官方登录链接。原生状态 `1 / 2 / 3 / 4` 分别表示等待、已扫码、已确认、已过期；适配器也可以返回对应的状态字符串。
 
@@ -24,11 +24,19 @@
 
 扫码期间保持后台页面打开。浏览器需要能访问官方组件域名 `lf-c-flwb.bytetos.com` 或备用域名 `lf-headquarters-speed.yhgfb-cn-static.com`，服务器需要能访问官方音乐接口。组件加载失败会显示提示，可调整网络后重新生成二维码。项目不分发第三方压缩 SDK 源码。
 
+## 额外身份验证
+
+汽水返回 `2046` 时，后台会自动打开官方身份验证窗口，按窗口提示完成短信或其他官方验证即可。取消后可以点击「继续身份验证」重新打开。完成验证后继续提交原二维码授权，登录成功会自动更新连接状态。
+
+验证期间保留原会话、验证决策和 Cookie。对于 `verify_center` 决策，先调用 `pack_verify_ways_data` 获取可用验证方式；官方组件完成后，携带原始 `biz_params` 和 `isResend=true` 重新提交 `check_qrconnect`。本地验证会话最长保留 10 分钟，二维码是否仍有效以平台返回为准。如果平台仍要求验证，页面显示继续验证入口，不会冒充已登录。
+
+官方界面依赖的 React / ReactDOM 17.0.2 随 `npm ci` 安装，并由本站按需提供；普通页面保持原生实现。平台验证脚本从决策指定的官方 CDN 加载，不接触后台登录态。验证请求通过受限接口回到 Node.js，由原会话发送；仅允许官方 Passport 验证路径和指定的验证码接口，登录 Cookie 不会返回浏览器。自建适配服务的额外验证由该服务自身处理。
+
 ## 异常提示
 
 - 扫码后短暂返回等待状态时，页面继续显示「已扫码」或「正在授权」。
 - 确认接口下发有效会话后立即保留登录，避免后续 API 根地址的 404 落地页误报失败。尚未取得会话时，授权跳转逐步收集 Cookie；回调暂时失败会继续重试该回调。
-- 汽水错误 `7` 会等待 5 秒再检查；错误 `2046` 表示平台要求额外身份验证，页面会提示在 APP 完成验证后重新扫码。
+- 汽水错误 `7` 会等待 5 秒再检查；错误 `2046` 会打开官方验证窗口。验证完成但提交授权时连接中断，可以继续提交，无需重复完成身份验证。
 - HTTP 错误、异常状态和非 JSON 响应会显示平台及错误码，不会伪装成「等待扫码」。诊断信息不包含 Cookie、会话或二维码 token。
 
 `MUSIC_API_BASE_URL` 留空使用内置直连。自建汽水适配服务应兼容 `/auth/qrcode`（GET）、`/auth/qrcode/status`（POST）、`/auth/me`（POST）与 `/me/playlists`（POST）。网易云适配服务应兼容 `/login/qr/key`、`/login/qr/create`、`/login/qr/check` 和 `/user/account`。
@@ -39,4 +47,4 @@
 
 2026-11-21 两家平台均已通过真实手机扫码确认，取得登录会话并成功查询账号资料。汽水验证使用本项目的后台浏览器沙盒签名与 Node.js 请求，确认接口返回 `status=confirmed / error_code=0` 并下发 `sessionid`；后续 `/luna/pc/me` 成功返回账号资料。诊断会话只保存在独立测试内存中，未替换用户配置。
 
-平台风控、额外身份验证和账号播放权限以官方结果为准。错误 `2046` 的平台验证窗口尚未集成；遇到该情况时按页面提示在官方 APP 完成验证后重新扫码。
+本次二次验证集成通过本地 HTTP 流程测试与真实浏览器检查，覆盖决策展开、签名、XHR/fetch 转发、取消后继续、授权重试和自动更新状态；官方验证界面在浏览器检查中使用明确的隔离替身。真实账号触发的 `2046` 验证是否通过，仍需手机配合按官方窗口验收。平台风控和账号播放权限以官方结果为准。

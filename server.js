@@ -14,6 +14,7 @@ import { loadDb, saveDb, id, now } from './src/store.js';
 import { appearanceSettings, validateAppearance } from './src/appearance.js';
 import { mergeCookies, normalizeQr, qrStatus, cookieValue, musicAuthError } from './src/music-auth.js';
 import { qishuiSignedRequest, acceptQishuiSignature } from './src/qishui-signing.js';
+import { publicVerificationData, verificationScript, verificationRequest, verificationResponse, verificationForm, verificationBizParams } from './src/qishui-verification.js';
 import { checkMonitor, getServerMetrics, inspectSsl } from './src/checkers.js';
 import { changelogSection, chooseVersionedRelease, compareVersions, normalizeVersion } from './src/update-check.js';
 
@@ -35,6 +36,13 @@ app.use(express.json({ limit: '256kb' }));
 app.use(cookieParser());
 // 签名沙盒没有同源权限；只让不含用户数据的引导脚本可从该沙盒加载。
 app.get('/assets/qishui-security-frame.js', (_req, res, next) => { res.setHeader('cross-origin-resource-policy', 'cross-origin'); next(); });
+for (const [asset, file] of [['qishui-react', 'react/umd/react.production.min.js'], ['qishui-react-dom', 'react-dom/umd/react-dom.production.min.js']]) {
+  app.get(`/assets/${asset}.js`, (_req, res) => {
+    res.setHeader('cross-origin-resource-policy', 'cross-origin');
+    res.setHeader('access-control-allow-origin', '*');
+    res.sendFile(path.resolve('node_modules', file));
+  });
+}
 app.use(express.static(path.resolve('public'), { extensions: ['html'] }));
 
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: '登录尝试过于频繁，请稍后再试' } });
@@ -140,7 +148,7 @@ async function musicRequest(pathname, options = {}) {
       url.searchParams.set('biz_trace_id', trace);
       url.searchParams.set('msToken', options.flow.msToken);
       headers['x-tt-passport-trace-id'] = trace;
-      headers['x-tt-passport-verify-portrait'] = options.flow.verifyPortraitId;
+      headers['x-tt-passport-verify-portrait'] = options.headers?.['x-tt-passport-verify-portrait'] || options.flow.verifyPortraitId;
       if (body !== undefined) headers['x-ss-stub'] = crypto.createHash('md5').update(body).digest('hex').toUpperCase();
     }
   }
@@ -484,13 +492,15 @@ async function createMusicQr(flow) {
   flow.stage = 'status';
   return { provider, providerLabel: provider === 'qishui' ? '汽水音乐' : '网易云音乐', token: flow.token, qrCode, scanApp: qr.scanApp, expiresAt: new Date(flow.expiresAt).toISOString() };
 }
-async function respondMusicQr(flow, res) {
+async function respondMusicQr(flow, res, action = flow.stage) {
   res.setHeader('cache-control', 'no-store');
+  if (flow.pending && flow.pendingAction !== action) return res.status(409).json({ error: '正在处理登录请求，请稍后重试', retryable: true });
   try {
-    flow.pending ??= (flow.stage === 'create' ? createMusicQr(flow) : checkMusicQr(flow)).finally(() => { flow.pending = null; });
+    flow.pendingAction = action;
+    flow.pending ??= (action === 'verification-start' ? startQishuiVerification(flow) : action === 'create' ? createMusicQr(flow) : checkMusicQr(flow)).finally(() => { flow.pending = null; });
     res.json(await flow.pending);
   } catch (error) {
-    if (error.signing && !flow.cancelled) return res.json({ token: flow.token, signing: error.signing });
+    if (error.signing && !flow.cancelled) { flow.signingAction = action; return res.json({ token: flow.token, signing: error.signing }); }
     if (flow.stage === 'create') removeMusicQrFlow(flow.token);
     res.status(error.status || 502).json({ error: error.message || '音乐登录请求失败', code: error.code, retryable: error.retryable ?? true });
   }
@@ -516,6 +526,7 @@ async function exchangeQishuiRedirect(flow, redirect) {
 }
 async function checkMusicQr(flow) {
   if (flow.confirmed) return { status: 'confirmed', loggedIn: true, account: db.settings.music.account };
+  if (flow.verification && !flow.verification.resend) return flow.lastResult;
   if (flow.provider === 'qishui' && flow.nextCheckAt > Date.now() && flow.lastResult) return flow.lastResult;
   const adapter = Boolean(musicBaseUrl());
   let payload;
@@ -525,9 +536,21 @@ async function checkMusicQr(flow) {
     ? await musicRequest('/auth/qrcode/status', { flow, method: 'POST', body: { token: flow.upstreamToken } })
     : await musicRequest('/login/qr/check', { flow, search: { key: flow.upstreamToken, timestamp: Date.now() } });
   else payload = flow.provider === 'qishui'
-    ? await musicRequest('/passport/web/check_qrconnect/', { flow, method: 'POST', search: flow.passportQuery, form: { token: flow.upstreamToken, need_logo: 'false', need_short_url: 'false', is_frontier: 'true', next: 'https://api.qishui.com', is_new_login: '1' } })
+    ? await musicRequest('/passport/web/check_qrconnect/', { flow, method: 'POST', search: { ...flow.passportQuery, ...(flow.verification?.resend ? { isResend: 'true' } : {}) }, form: { ...verificationBizParams(flow.verification?.decision), token: flow.upstreamToken, need_logo: 'false', need_short_url: 'false', is_frontier: 'true', next: 'https://api.qishui.com', is_new_login: '1' } })
     : await musicRequest('/weapi/login/qrcode/client/login', { flow, method: 'POST', form: neteaseWeapi({ key: flow.upstreamToken, type: 3, csrf_token: cookieValue(flow.cookie, '__csrf') }) });
   const result = qrStatus(flow.provider, payload, adapter);
+  if (result.status === 'verification_required') {
+    const repeated = Boolean(flow.verification);
+    flow.verification = { id: id(), decision: publicVerificationData(result.decision), ready: false, resend: false };
+    // 官方验证可能需要短信/滑块；只放宽本地会话，不伪造二维码的官方有效期。
+    flow.verificationExpiresAt ||= Date.now() + 600000;
+    flow.expiresAt = flow.verificationExpiresAt;
+    clearTimeout(flow.expiryTimer);
+    flow.expiryTimer = setTimeout(() => removeMusicQrFlow(flow.token), Math.max(0, flow.expiresAt - Date.now()) + 1000);
+    flow.expiryTimer.unref();
+    flow.lastResult = { status: 'verification_required', message: repeated ? '平台仍要求验证，请点击继续身份验证。' : result.message, verification: { id: flow.verification.id, expiresAt: new Date(flow.expiresAt).toISOString(), available: !adapter } };
+    return flow.lastResult;
+  }
   if (result.cookie) flow.cookie = mergeCookies(flow.cookie, result.cookie.split(';').map(value => value.trim()));
   if (result.status === 'pending' && flow.progress === 'authorizing' && (flow.provider === 'qishui' ? cookieValue(flow.cookie, 'sessionid') || cookieValue(flow.cookie, 'sessionid_ss') : cookieValue(flow.cookie, 'MUSIC_U'))) result.status = 'confirmed';
   if (result.status === 'scanned' && flow.progress !== 'authorizing') flow.progress = 'scanned';
@@ -553,6 +576,7 @@ async function checkMusicQr(flow) {
   db.settings.music.account = null;
   await saveDb(db);
   flow.confirmed = true;
+  flow.verification = null;
   flow.signingRequest = null;
   flow.signedRequest = null;
   // 资料、歌单查询失败不回滚已落盘的登录；由后续配置请求独立同步。
@@ -576,7 +600,68 @@ app.post('/api/music/login/qr/signature', requireAdmin, async (req, res) => {
     if (flow.pending) return res.status(409).json({ error: '正在处理汽水登录请求，请稍后重试', retryable: true });
     acceptQishuiSignature(flow, req.body || {});
   } catch (error) { return res.status(400).json({ error: error.message, code: error.code, retryable: false }); }
-  await respondMusicQr(flow, res);
+  await respondMusicQr(flow, res, flow.signingAction);
+});
+async function startQishuiVerification(flow) {
+  const verification = flow.verification;
+  if (!verification || flow.provider !== 'qishui' || musicBaseUrl()) throw Object.assign(new Error('当前登录流程没有可用的身份验证'), { status: 409 });
+  let decision = verification.decision;
+  if (!verification.ready && decision.verify_from === 'verify_center') {
+    const payload = await musicRequest('/passport/safe/pack_verify_ways_data/', { flow, method: 'POST', search: { aid: '386088' }, form: verificationForm(decision, flow.passportQuery), headers: { 'x-tt-passport-verify-portrait': decision.verify_portrait_id || flow.verifyPortraitId } });
+    const expanded = musicData(payload);
+    if (!expanded || Number(expanded.error_code) > 0 || payload.message === 'error') throw musicAuthError('qishui', payload);
+    decision = { ...decision, ...publicVerificationData(expanded), biz_params: decision.biz_params };
+  }
+  const scriptUrl = verificationScript(decision.url);
+  if (flow.cancelled || flow.verification !== verification) throw Object.assign(new Error('身份验证已失效'), { status: 409 });
+  verification.decision = decision;
+  verification.ready = true;
+  return { token: flow.token, verificationId: verification.id, decision, scriptUrl, generalParams: flow.passportQuery, msToken: flow.msToken, expiresAt: new Date(flow.expiresAt).toISOString() };
+}
+function findQishuiVerification(req, res) {
+  res.setHeader('cache-control', 'no-store');
+  const flow = findMusicQrFlow(req, res);
+  if (!flow) return null;
+  if (flow.provider !== 'qishui' || musicBaseUrl() || !flow.verification || flow.verification.id !== req.body?.verificationId || flow.confirmed) { res.status(409).json({ error: '身份验证会话已失效，请重新扫码', retryable: false }); return null; }
+  return flow;
+}
+app.post('/api/music/login/qr/verification/start', requireAdmin, async (req, res) => {
+  const flow = findQishuiVerification(req, res);
+  if (flow) await respondMusicQr(flow, res, 'verification-start');
+});
+app.post('/api/music/login/qr/verification/request', requireAdmin, async (req, res) => {
+  const flow = findQishuiVerification(req, res);
+  if (!flow) return;
+  if (!flow.verification.ready || flow.verification.resend || flow.verification.pending >= 4) return res.status(409).json({ error: '验证请求正在处理或已经结束', retryable: true });
+  let request;
+  try { request = verificationRequest(req.body.request, flow); }
+  catch (error) { return res.status(400).json({ error: error.message, retryable: false }); }
+  const verification = flow.verification;
+  verification.pending = (verification.pending || 0) + 1;
+  try {
+    const response = await fetch(request.url, { method: request.method, body: request.body, headers: request.headers, redirect: 'manual', signal: AbortSignal.timeout(20000) });
+    if (request.url.pathname.startsWith('/passport/')) {
+      mergeSetCookies(response.headers, flow);
+      const token = response.headers.get('x-ms-token') || request.url.searchParams.get('msToken');
+      if (/^[A-Za-z0-9/_+=-]{20,200}$/.test(token || '')) flow.msToken = token;
+    }
+    if (response.status >= 300 && response.status < 400) { await response.body?.cancel(); throw new Error('身份验证接口返回了不受支持的跳转'); }
+    const data = await verificationResponse(response);
+    if (flow.cancelled || flow.verification !== verification) return res.status(409).json({ error: '身份验证已取消', retryable: false });
+    const headers = Object.fromEntries(['content-type', 'x-tt-logid', 'x-ms-token'].map(name => [name, response.headers.get(name)]).filter(([, value]) => value));
+    res.json({ status: response.status, body: JSON.stringify(publicVerificationData(data)), headers });
+  } catch (error) { res.status(502).json({ error: error.message || '无法连接身份验证接口，请重试', retryable: true }); }
+  finally { verification.pending -= 1; }
+});
+app.post('/api/music/login/qr/verification/complete', requireAdmin, async (req, res) => {
+  const flow = findQishuiVerification(req, res);
+  if (!flow) return;
+  if (!flow.verification.ready || flow.verification.pending || flow.pending) return res.status(409).json({ error: '身份验证尚未就绪，请稍后重试', retryable: true });
+  flow.verification.resend = true;
+  flow.nextCheckAt = 0;
+  flow.signingRequest = null;
+  flow.signedRequest = null;
+  await respondMusicQr(flow, res, 'status');
 });
 app.get('/api/music/playlists', requireAdmin, async (_req, res) => {
   try {

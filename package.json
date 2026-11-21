@@ -1,6 +1,6 @@
 {
   "name": "status-girl",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "private": true,
   "description": "Status姬：面向个人服务器与小型团队的轻量服务监控与状态页",
   "type": "module",
@@ -19,7 +19,9 @@
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.0.0",
     "nodemailer": "^10.6.0",
-    "qrcode": "^1.5.4"
+    "qrcode": "^1.5.4",
+    "react": "17.0.2",
+    "react-dom": "17.0.2"
   },
   "license": "MIT",
   "author": "futao-awa",

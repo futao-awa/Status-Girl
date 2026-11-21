@@ -13,6 +13,7 @@ import cookieParser from 'cookie-parser';
 import QRCode from 'qrcode';
 import { cookieValue, mergeCookies, normalizeQr, qrStatus, musicAuthError } from '../src/music-auth.js';
 import { qishuiSignedRequest, acceptQishuiSignature } from '../src/qishui-signing.js';
+import * as verificationHelpers from '../src/qishui-verification.js';
 
 const source = readFileSync(new URL('../server.js', import.meta.url), 'utf8');
 const frontendSource = readFileSync(new URL('../public/assets/admin.js', import.meta.url), 'utf8');
@@ -36,6 +37,12 @@ test('生产安全响应头允许隔离签名组件加载，后台脚本仍使�
   const frame = await fetch(base + '/assets/qishui-security-frame.js');
   assert.equal(frame.status, 200);
   assert.equal(frame.headers.get('cross-origin-resource-policy'), 'cross-origin');
+  for (const name of ['qishui-react', 'qishui-react-dom']) {
+    const dependency = await fetch(base + `/assets/${name}.js`);
+    assert.equal(dependency.status, 200);
+    assert.equal(dependency.headers.get('cross-origin-resource-policy'), 'cross-origin');
+    assert.equal(dependency.headers.get('access-control-allow-origin'), '*');
+  }
   const admin = await fetch(base + '/assets/admin.js');
   assert.equal(admin.status, 200);
   assert.equal(admin.headers.get('cross-origin-resource-policy'), 'same-origin');
@@ -68,7 +75,7 @@ async function fixture(t, provider, upstream, adapter = false) {
     requireAdmin(req, _res, next) { req.user = { userId: req.headers['x-test-user'] || 'test-admin' }; next(); },
     id: () => crypto.randomUUID(), saveDb: data => writeFile(file, JSON.stringify(data)),
     musicQrData: url => QRCode.toDataURL(url),
-    qishuiSignedRequest, acceptQishuiSignature,
+    qishuiSignedRequest, acceptQishuiSignature, ...verificationHelpers,
     fetch(url, options) {
       const target = new URL(String(url));
       return fetch(`${mockUrl}${target.pathname}${target.search}`, options);
@@ -101,7 +108,7 @@ async function fixture(t, provider, upstream, adapter = false) {
     return { http: res.status, data };
   }
   return {
-    db, calls, context, base,
+    db, calls, context, base, request, advance: ms => { clock += ms; },
     async create() { const result = await request('/api/music/login/qr'); assert.equal(result.http, 200, JSON.stringify(result.data)); return result.data; },
     async poll(qr, advance = true) { if (advance) clock += 6000; return request('/api/music/login/qr/status?token=' + qr.token); },
     async persisted() { return JSON.parse(await readFile(file, 'utf8')); },
@@ -343,6 +350,122 @@ test('汽水服务端执行限流冷却，重复前端请求不重复访问平�
   assert.equal(checks, 2);
 });
 
+const verifyScript = 'https://lf3-cdn-tos.bytescm.com/obj/static/ies/passport/verify.js';
+test('汽水 2046 展开官方决策，共用 Cookie 验证后带原始 biz_params 重发确认并自动保存', async t => {
+  let checks = 0;
+  const f = await fixture(t, 'qishui', (call, res) => {
+    if (call.url.pathname.endsWith('/get_qrcode/')) return json(res, { data: { token: 'original-qr', qrcode_index_url: 'https://qishui.com/official' } }, ['passport_csrf_token=original-csrf; Path=/']);
+    if (call.url.pathname.endsWith('/pack_verify_ways_data/')) {
+      const form = new URLSearchParams(call.body);
+      assert.equal(form.get('aid'), '386088');
+      assert.equal(form.get('is_login'), null);
+      assert.equal(form.get('verify_from'), 'verify_center');
+      assert.equal(call.headers['x-tt-passport-verify-portrait'], 'official-portrait');
+      assert.equal(call.headers['x-tt-passport-csrf-token'], 'original-csrf');
+      return json(res, { data: { url: { host: 'lf3-cdn-tos.bytescm.com', path: '/obj/static/ies/passport/verify.js' }, verify_ways: [{ way: 'mobile' }], biz_params: { verify_ticket: 'wrong-expanded-ticket' } } });
+    }
+    if (call.url.pathname.endsWith('/validate_code/')) {
+      assert.match(call.headers.cookie, /passport_csrf_token=original-csrf/);
+      assert.equal(call.headers['user-agent'], 'Status-Girl Browser Test');
+      assert.equal(call.body, 'code=123456');
+      return json(res, { data: { status: true, ticket: 'component-ticket', session_cookie: 'hidden-credential' } }, ['verified_device=verified; Path=/']);
+    }
+    if (call.url.pathname === '/captcha/get') {
+      assert.equal(call.headers.cookie, undefined);
+      assert.equal(call.headers['x-tt-passport-csrf-token'], undefined);
+      return json(res, { data: { challenge: 'captcha-challenge' } }, ['sessionid=ignore-captcha-cookie; Path=/']);
+    }
+    checks++;
+    if (checks === 1) return json(res, { message: 'error', data: { error_code: 2046, is_login: true, verify_from: 'verify_center', verify_portrait_id: 'official-portrait', event_params: '{"verify_scene":"login"}', biz_params: '{"verify_ticket":"original-ticket","context":{"scene":"qr"},"token":"cannot-replace-qr","next":"https://evil.test"}' } });
+    assert.equal(call.url.searchParams.get('isResend'), 'true');
+    const form = new URLSearchParams(call.body);
+    assert.equal(form.get('token'), 'original-qr');
+    assert.equal(form.get('verify_ticket'), 'original-ticket');
+    assert.deepEqual(JSON.parse(form.get('context')), { scene: 'qr' });
+    assert.equal(form.get('next'), 'https://api.qishui.com');
+    assert.match(call.headers.cookie, /verified_device=verified/);
+    json(res, { data: { status: 'confirmed' } }, ['sessionid=actual-new-session; Path=/; HttpOnly']);
+  });
+  const qr = await f.create();
+  const required = (await f.poll(qr)).data;
+  assert.equal(required.status, 'verification_required');
+  assert.equal(required.verification.available, true);
+  assert.ok(Date.parse(required.verification.expiresAt) > Date.parse(qr.expiresAt));
+  assert.equal(JSON.stringify(required).includes('original-ticket'), false);
+  const input = { token: qr.token, verificationId: required.verification.id };
+  const post = (suffix, extra = {}) => f.request('/api/music/login/qr/verification/' + suffix, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...input, ...extra }) });
+  assert.equal((await post('complete')).http, 409);
+  f.advance(181000);
+  assert.equal((await f.poll(qr, false)).data.status, 'verification_required');
+  assert.equal(checks, 1);
+  const start = await post('start');
+  assert.equal(start.http, 200);
+  assert.equal(start.data.scriptUrl, verifyScript);
+  assert.equal((await f.poll(qr, false)).data.status, 'verification_required');
+  const captcha = await post('request', { request: { url: 'https://verify.snssdk.com/captcha/get', method: 'GET' } });
+  assert.equal(captcha.http, 200);
+  assert.equal(JSON.parse(captcha.data.body).data.challenge, 'captcha-challenge');
+  assert.equal(f.loggedIn(), false);
+  const relay = await post('request', { request: { url: 'https://api.qishui.com/passport/safe/validate_code/?aid=386088', method: 'POST', body: 'code=123456', headers: { 'content-type': 'application/x-www-form-urlencoded', cookie: 'must-not-forward' } } });
+  assert.equal(relay.http, 200);
+  assert.equal(JSON.parse(relay.data.body).data.ticket, 'component-ticket');
+  assert.equal(JSON.stringify(relay).includes('hidden-credential'), false);
+  assert.equal(JSON.stringify(relay).includes('verified_device'), false);
+  const complete = await post('complete');
+  assert.equal(complete.data.loggedIn, true);
+  assert.equal(f.loggedIn(), true);
+  assert.equal(cookieValue((await f.persisted()).settings.music.cookie, 'sessionid'), 'actual-new-session');
+  assert.equal((await f.poll(qr, false)).data.loggedIn, true);
+  assert.equal(checks, 2);
+  assert.equal((await post('request', { request: {} })).http, 409);
+});
+
+test('验证请求绑定管理员和决策，拒绝代理绕过、失效回执；组件成功回调不能伪造平台登录', async t => {
+  let checks = 0;
+  const f = await fixture(t, 'qishui', (call, res) => {
+    if (call.url.pathname.endsWith('/get_qrcode/')) return json(res, { data: { token: 'qr', qrcode_index_url: 'https://qishui.com/official' } });
+    checks++;
+    json(res, { error_code: 2046, data: { verify_from: 'verify', url: verifyScript, biz_params: {} } });
+  });
+  const qr = await f.create();
+  const required = (await f.poll(qr)).data;
+  const input = { token: qr.token, verificationId: required.verification.id };
+  const post = (suffix, extra = {}, user = 'test-admin') => f.request('/api/music/login/qr/verification/' + suffix, { method: 'POST', headers: { 'content-type': 'application/json', 'x-test-user': user }, body: JSON.stringify({ ...input, ...extra }) });
+  assert.equal((await post('start', {}, 'another-admin')).http, 404);
+  assert.equal((await post('start', { verificationId: 'invalid' })).http, 409);
+  assert.equal((await post('start')).data.scriptUrl, verifyScript);
+  for (const url of ['https://evil.test/passport/safe/verify/', 'https://api.qishui.com@evil.test/passport/safe/verify/', 'https://api.qishui.com:8443/passport/safe/verify/', 'http://api.qishui.com/passport/safe/verify/', 'https://api.qishui.com/passport/web/login/', 'https://api.qishui.com/passport/safe/../web/login/', 'https://api.qishui.com/passport/safe/verify/?aid=123']) {
+    assert.equal((await post('request', { request: { url, method: 'GET' } })).http, 400, url);
+  }
+  assert.equal(checks, 1);
+  const again = (await post('complete', { success: true, sessionid: 'forged' })).data;
+  assert.equal(again.status, 'verification_required');
+  assert.notEqual(again.verification.id, input.verificationId);
+  assert.equal(f.loggedIn(), false);
+  assert.equal((await post('complete')).http, 409);
+  f.advance(600001);
+  assert.equal((await post('request')).data.status, 'expired');
+  assert.equal(checks, 2);
+});
+
+test('二次验证的待签名操作不会被普通状态轮询替换', async t => {
+  const f = await fixture(t, 'qishui', (call, res) => {
+    if (call.url.pathname.endsWith('/get_qrcode/')) return json(res, { data: { token: 'qr', qrcode_index_url: 'https://qishui.com/official' } });
+    if (call.url.pathname.endsWith('/pack_verify_ways_data/')) return json(res, { data: { url: verifyScript } });
+    json(res, { data: { error_code: 2046, verify_from: 'verify_center' } });
+  });
+  const qr = await f.create();
+  const status = (await f.poll(qr)).data;
+  const response = await fetch(f.base + '/api/music/login/qr/verification/start', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: qr.token, verificationId: status.verification.id }) });
+  const challenge = await response.json();
+  assert.ok(challenge.signing);
+  await f.poll(qr, false);
+  const signed = new URL(challenge.signing.url);
+  signed.searchParams.set('a_bogus', 'a'.repeat(44));
+  const result = await f.request('/api/music/login/qr/signature', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: qr.token, requestId: challenge.signing.requestId, signedUrl: signed.href, userAgent: 'Status-Girl Browser Test' }) });
+  assert.equal(result.data.scriptUrl, verifyScript);
+});
+
 test('前端保留扫码进度和授权提示，额外身份验证停止重试，未落盘的 confirmed 不显示成功', async () => {
   const elements = Object.fromEntries(['musicQrButton', 'musicQrBox', 'musicQrImage', 'musicQrHint', 'musicProvider'].map(id => ['#' + id, { hidden: true, value: id === 'musicProvider' ? 'qishui' : '' }]));
   const timers = [];
@@ -367,4 +490,40 @@ test('前端保留扫码进度和授权提示，额外身份验证停止重试�
   assert.equal(timers.length, 0);
   assert.equal(successes, 0);
   assert.equal(elements['#musicQrHint'].textContent, '需要身份验证');
+});
+
+test('前端自动打开二次验证，取消后可继续；提交暂时失败仅重试授权，成功后自动连接', async () => {
+  const elements = Object.fromEntries(['musicQrButton', 'musicQrBox', 'musicQrImage', 'musicQrHint', 'musicVerifyButton', 'musicProvider'].map(id => ['#' + id, { hidden: true, value: id === 'musicProvider' ? 'qishui' : '' }]));
+  const required = { status: 'verification_required', message: '需要验证', verification: { id: 'decision', available: true, expiresAt: new Date(Date.now() + 600000).toISOString() } };
+  const timers = [];
+  let verifies = 0, submits = 0, successes = 0, connected = false;
+  const state = { settings: { music: { loggedIn: false } } };
+  const context = vm.createContext({ Date, Set, musicQrGeneration: 0, musicQrTimer: 0, state, $: selector => elements[selector],
+    window: { clearTimeout() {}, setTimeout(fn) { timers.push(fn); return timers.length; }, qishuiSigning: { dispose() {}, async verify() { verifies++; return { success: verifies > 1, message: '取消验证' }; } } },
+    api: async url => {
+      if (url.endsWith('/verification/start')) return { token: 'test', verificationId: 'decision' };
+      if (url.endsWith('/verification/complete')) { submits++; if (submits === 1) throw new Error('连接中断'); connected = true; return { status: 'confirmed', loggedIn: true }; }
+      if (url.endsWith('/qr')) return { token: 'test', qrCode: 'data:image/png;base64,test', expiresAt: new Date(Date.now() + 180000).toISOString() };
+      return connected ? { status: 'confirmed', loggedIn: true } : required;
+    }, renderMusicAdmin() {}, toast() { successes++; }, reload: async () => {}, loadMusicPlaylists() {}
+  });
+  vm.runInContext(frontendSource.slice(frontendSource.indexOf('function stopMusicQr('), frontendSource.indexOf('async function loadMusicPlaylists(')), context);
+  await vm.runInContext('startMusicQr()', context);
+  await timers.shift()();
+  assert.equal(verifies, 1);
+  assert.equal(elements['#musicVerifyButton'].hidden, false);
+  assert.equal(elements['#musicQrHint'].textContent, '取消验证');
+  assert.equal(timers.length, 0);
+  await elements['#musicVerifyButton'].onclick();
+  assert.equal(verifies, 2);
+  assert.equal(submits, 1);
+  assert.equal(elements['#musicQrHint'].textContent, '连接中断');
+  assert.equal(state.settings.music.loggedIn, false);
+  await elements['#musicVerifyButton'].onclick();
+  assert.equal(verifies, 2);
+  assert.equal(submits, 2);
+  await timers.shift()();
+  assert.equal(state.settings.music.loggedIn, true);
+  assert.equal(successes, 1);
+  assert.equal(elements['#musicQrBox'].hidden, true);
 });

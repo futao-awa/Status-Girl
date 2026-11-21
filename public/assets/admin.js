@@ -317,13 +317,15 @@ function stopMusicQr() {
   musicQrGeneration += 1;
   window.clearTimeout(musicQrTimer);
   window.qishuiSigning?.dispose();
+  const verificationButton = $('#musicVerifyButton');
+  if (verificationButton) { verificationButton.hidden = true; verificationButton.onclick = null; }
   const button = $('#musicQrButton');
   if (button) { button.disabled = false; button.textContent = '扫码登录'; }
   const box = $('#musicQrBox');
   if (box) box.hidden = true;
 }
-async function musicQrRequest(url, active) {
-  let result = await api(url);
+async function musicQrRequest(url, active, options) {
+  let result = await api(url, options);
   for (let attempt = 0; result.signing && attempt < 3; attempt += 1) {
     if (!active()) return result;
     if (!window.qishuiSigning) throw new Error('汽水扫码组件未加载，请刷新后台后重试');
@@ -351,13 +353,71 @@ async function startMusicQr() {
     $('#musicQrHint').textContent = provider === 'qishui' ? (result.scanApp === 'douyin' ? '请使用已登录的抖音 APP 扫码，并在手机上确认登录' : '请按二维码页面提示选择 APP 扫码，并在手机上确认登录') : '使用网易云音乐扫码，并在手机上确认登录';
     let failures = 0;
     let progress = 'pending';
+    let expiresAt = Date.parse(result.expiresAt);
+    let verificationAttempted = false;
+    const verifiedIds = new Set();
+    const verifyIdentity = async status => {
+      if (!status.verification?.available || !window.qishuiSigning?.verify) return null;
+      const verificationButton = $('#musicVerifyButton');
+      const input = { token: result.token, verificationId: status.verification.id };
+      if (verificationButton) { verificationButton.hidden = true; verificationButton.onclick = null; }
+      try {
+        if (!verifiedIds.has(input.verificationId)) {
+          const config = await musicQrRequest('/api/music/login/qr/verification/start', active, { method: 'POST', body: JSON.stringify(input) });
+          if (!active()) return null;
+          if (config.status === 'expired') return config;
+          const verified = await window.qishuiSigning.verify(config, { active, request: api });
+          if (!active()) return null;
+          if (!verified?.success) throw new Error(verified?.message || '身份验证未完成');
+          verifiedIds.add(input.verificationId);
+        }
+        $('#musicQrHint').textContent = '验证已完成，正在提交登录授权…';
+        return await musicQrRequest('/api/music/login/qr/verification/complete', active, { method: 'POST', body: JSON.stringify(input) });
+      } catch (error) {
+        if (active()) {
+          $('#musicQrHint').textContent = error.message;
+          if (verificationButton) { verificationButton.hidden = false; verificationButton.onclick = () => resumeVerification(status); }
+        }
+        return null;
+      }
+    };
+    const resumeVerification = async status => {
+      try {
+        const resumed = await verifyIdentity(status);
+        if (active() && resumed) handleVerificationResult(resumed);
+      } catch (error) {
+        if (!active()) return;
+        $('#musicQrHint').textContent = error.message;
+        const verificationButton = $('#musicVerifyButton');
+        if (verificationButton) { verificationButton.hidden = false; verificationButton.onclick = () => resumeVerification(status); }
+      }
+    };
+    const handleVerificationResult = status => {
+      if (status.status === 'verification_required') {
+        $('#musicQrHint').textContent = status.message;
+        const verificationButton = $('#musicVerifyButton');
+        if (verificationButton) { verificationButton.hidden = false; verificationButton.onclick = () => resumeVerification(status); }
+      } else if (status.status === 'expired') { window.qishuiSigning?.dispose(); $('#musicQrHint').textContent = '验证已过期，请重新扫码'; }
+      else musicQrTimer = window.setTimeout(poll, 0);
+    };
     const poll = async () => {
       if (!active()) return;
-      if (Date.now() >= Date.parse(result.expiresAt)) { window.qishuiSigning?.dispose(); $('#musicQrHint').textContent = '二维码已过期，请重新生成'; return; }
+      if (Date.now() >= expiresAt) { window.qishuiSigning?.dispose(); $('#musicQrHint').textContent = '二维码已过期，请重新生成'; return; }
       let retryAfterMs = 1500;
       try {
-        const status = await musicQrRequest('/api/music/login/qr/status?token=' + encodeURIComponent(result.token), active);
+        let status = await musicQrRequest('/api/music/login/qr/status?token=' + encodeURIComponent(result.token), active);
         if (!active()) return;
+        if (status.status === 'verification_required') {
+          expiresAt = Date.parse(status.verification?.expiresAt) || expiresAt;
+          $('#musicQrHint').textContent = status.message;
+          if (!verificationAttempted && status.verification?.available && window.qishuiSigning?.verify) {
+            verificationAttempted = true;
+            const resumed = await verifyIdentity(status);
+            if (!active() || !resumed) return;
+            status = resumed;
+          }
+          if (status.status === 'verification_required') { handleVerificationResult(status); return; }
+        }
         failures = 0;
         if (status.status === 'confirmed' && status.loggedIn) {
           window.qishuiSigning?.dispose();
@@ -371,7 +431,7 @@ async function startMusicQr() {
         if (status.status === 'authorizing' || status.status === 'confirmed') progress = 'authorizing';
         const visible = status.status === 'pending' ? progress : status.status;
         $('#musicQrHint').textContent = status.message || (visible === 'authorizing' ? '手机已确认，正在完成登录授权…' : visible === 'scanned' ? '已扫码，请在手机上确认登录…' : visible === 'expired' ? '二维码已过期，请重新生成' : '等待扫码…');
-        if (status.status === 'expired' || status.status === 'verification_required') { window.qishuiSigning?.dispose(); return; }
+        if (status.status === 'expired') { window.qishuiSigning?.dispose(); return; }
         retryAfterMs = Math.max(1500, Math.min(10000, Number(status.retryAfterMs) || 1500));
       } catch (error) {
         if (!active()) return;
