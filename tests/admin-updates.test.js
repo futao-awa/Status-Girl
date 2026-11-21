@@ -26,7 +26,7 @@ test('汽水二维码优先原始图片与链接，并报告平台实际错误',
   assert.equal(qr.token,'test');
   assert.equal(qr.image,'data:image/png;base64,abc');
   assert.equal(qr.expiresAt,1800000000000);
-  assert.throws(()=>normalizeQr({message:'error',data:{error_code:3,description:'缺少参数'}}),/缺少参数/);
+  assert.throws(()=>normalizeQr({message:'error',data:{error_code:3,description:'缺少参数'}}),/错误（3）/);
 });
 
 test('扫码状态兼容原生与适配器，不混淆汽水等待、扫描和过期', () => {
@@ -36,9 +36,11 @@ test('扫码状态兼容原生与适配器，不混淆汽水等待、扫描和�
   assert.equal(qrStatus('qishui',{data:{status:'new',error_code:0}}).status,'pending');
   assert.equal(qrStatus('qishui',{data:{status:'scanned'}}).status,'scanned');
   assert.equal(qrStatus('qishui',{data:{status:'confirmed',redirect_url:'https://api.qishui.com/finish'}}).status,'confirmed');
-  assert.equal(qrStatus('qishui',{data:{status:2}},true).status,'confirmed');
-  assert.equal(qrStatus('qishui',{data:{status:2}}).status,'confirmed');
-  assert.equal(qrStatus('qishui',{data:{status:3}},true).status,'expired');
+  assert.equal(qrStatus('qishui',{data:{status:1}},true).status,'pending');
+  assert.equal(qrStatus('qishui',{data:{status:2}}).status,'scanned');
+  assert.equal(qrStatus('qishui',{data:{status:3}},true).status,'confirmed');
+  assert.equal(qrStatus('qishui',{data:{status:4}}).status,'expired');
+  assert.equal(qrStatus('qishui',{code:0,data:{data:{status:'confirmed'},auth:{sessionid:'fixture-session'}}}).sessionId,'fixture-session');
 });
 
 test('版本比较兼容 v、release 前缀，并选择最高稳定标签', () => {
@@ -82,10 +84,10 @@ test('网易云确认后先持久化登录，再返回；资料查询不阻塞�
 });
 
 test('内层扫码确认及汽水会话凭据都能完成登录保存', async () => {
-  const netease = qrBackend({code:200,data:{code:803,cookie:'MUSIC_A=credential'}});
+  const netease = qrBackend({code:200,data:{code:803,cookie:'MUSIC_U=credential'}});
   assert.equal((await netease.run()).loggedIn,true);
   assert.equal(netease.saved(),1);
-  const qishui = qrBackend({data:{status:2,session_id:'fixture-session'}},'qishui');
+  const qishui = qrBackend({data:{status:3,session_id:'fixture-session'}},'qishui');
   assert.equal((await qishui.run()).loggedIn,true);
   assert.equal(qishui.db.settings.music.sessionId,'fixture-session');
   assert.equal(qishui.saved(),1);
@@ -93,7 +95,7 @@ test('内层扫码确认及汽水会话凭据都能完成登录保存', async ()
 
 test('未取得凭据不冒充登录；退出后的旧扫码响应不能重新登录', async () => {
   const incomplete=qrBackend({code:803});
-  assert.equal((await incomplete.run()).status,'scanned');
+  assert.equal((await incomplete.run()).status,'authorizing');
   assert.equal(incomplete.saved(),0);
   const stale=qrBackend({code:803,cookie:'MUSIC_U=credential'});
   stale.context.musicAuthGeneration=1;
@@ -213,7 +215,7 @@ test('前端扫码轮询串行重试，确认后立即更新状态且不等待�
   const state={settings:{music:{}}};
   const context=vm.createContext({state,musicQrGeneration:0,musicQrTimer:0,Date,
     window:{clearTimeout(){},setTimeout(fn){timers.push(fn);return timers.length;}},$:(selector)=>elements[selector],
-    api:async(url)=>url.endsWith('/qr')?{token:'test',qrCode:'data:image/png;base64,test',expiresAt:new Date(Date.now()+180000).toISOString()}:(++calls===1?Promise.reject(Error('暂时离线')):{status:'confirmed',account:null}),
+    api:async(url)=>url.endsWith('/qr')?{token:'test',qrCode:'data:image/png;base64,test',expiresAt:new Date(Date.now()+180000).toISOString()}:(++calls===1?Promise.reject(Error('暂时离线')):{status:'confirmed',loggedIn:true,account:null}),
     renderMusicAdmin(){renders++;},toast(){},reload(){reloads++;return new Promise(()=>{});},loadMusicPlaylists(){}
   });
   vm.runInContext(source.slice(source.indexOf('function stopMusicQr('),source.indexOf('async function loadMusicPlaylists(')),context);

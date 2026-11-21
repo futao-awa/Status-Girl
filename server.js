@@ -12,7 +12,8 @@ import QRCode from 'qrcode';
 import path from 'node:path';
 import { loadDb, saveDb, id, now } from './src/store.js';
 import { appearanceSettings, validateAppearance } from './src/appearance.js';
-import { mergeCookies, normalizeQr, qrStatus, cookieValue } from './src/music-auth.js';
+import { mergeCookies, normalizeQr, qrStatus, cookieValue, musicAuthError } from './src/music-auth.js';
+import { qishuiSignedRequest, acceptQishuiSignature } from './src/qishui-signing.js';
 import { checkMonitor, getServerMetrics, inspectSsl } from './src/checkers.js';
 import { changelogSection, chooseVersionedRelease, compareVersions, normalizeVersion } from './src/update-check.js';
 
@@ -32,6 +33,8 @@ app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: '256kb' }));
 app.use(cookieParser());
+// 签名沙盒没有同源权限；只让不含用户数据的引导脚本可从该沙盒加载。
+app.get('/assets/qishui-security-frame.js', (_req, res, next) => { res.setHeader('cross-origin-resource-policy', 'cross-origin'); next(); });
 app.use(express.static(path.resolve('public'), { extensions: ['html'] }));
 
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: true, legacyHeaders: false, message: { error: '登录尝试过于频繁，请稍后再试' } });
@@ -63,13 +66,14 @@ function musicLoggedIn() {
   const music = db.settings.music || {};
   const provider = music.provider || musicProvider();
   if (provider === 'qishui') return Boolean(music.sessionId || cookieValue(music.cookie, 'sessionid') || cookieValue(music.cookie, 'sessionid_ss'));
-  return Boolean(cookieValue(music.cookie, 'MUSIC_U') || cookieValue(music.cookie, 'MUSIC_A'));
+  return Boolean(cookieValue(music.cookie, 'MUSIC_U'));
 }
 function musicSessionHeaders() {
   const music = db.settings.music || {};
   const headers = { accept: 'application/json', 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36' };
   if (music.provider === 'qishui' && music.sessionId) headers['x-session-id'] = music.sessionId;
   if (music.cookie) headers.cookie = music.cookie;
+  if (music.provider === 'qishui' && music.sessionId && !cookieValue(headers.cookie, 'sessionid')) headers.cookie = mergeCookies(headers.cookie, [`sessionid=${music.sessionId}`]);
   return headers;
 }
 function mergeSetCookies(headers, flow) {
@@ -101,7 +105,13 @@ function neteaseWeapi(payload) {
 }
 function musicData(payload) { return payload?.data ?? payload; }
 function qishuiQuery() {
-  return { aid: 386088, app_name: 'luna_pc', iid: musicDeviceId(), version_name: '3.5.1', version_code: 30050100, channel: 'official', region: 'cn', geo_region: 'cn', os_region: 'cn', device_platform: 'windows', device_type: 'Windows' };
+  return { aid: 386088, app_name: 'luna_pc', device_id: musicDeviceId(), iid: db.settings.music.installId || musicDeviceId(), version_name: '3.5.1', version_code: 30050100, channel: 'official', region: 'cn', geo_region: 'cn', os_region: 'cn', device_platform: 'windows', device_type: 'Windows' };
+}
+function qishuiPassportQuery() {
+  const music = db.settings.music;
+  if (!/^\d{12,24}$/.test(String(music.installId || '')) || music.installId === musicDeviceId()) music.installId = `${Date.now()}${crypto.randomInt(10000, 99999)}`;
+  // 对齐 PC Passport SDK 的参数，不能混入歌曲接口的设备平台参数。
+  return { aid: '386088', device_id: musicDeviceId(), did: musicDeviceId(), install_id: music.installId, iid: music.installId, passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: '1', account_sdk_source: 'web', language: 'zh', p_js_v: '2.4.13', p_js_t: 'pro', p_zt: '3.3.5', p_ver: '1.0.29', request_host: 'app%3A%2F%2Fresources', p_bd: '1.0.0.41', is_from_iesaccountsaas: '1', device_platform: 'PC', version_code: '3.5.2', account_sdk_source_info: '00' };
 }
 async function musicRequest(pathname, options = {}) {
   const adapterBase = musicBaseUrl();
@@ -109,7 +119,7 @@ async function musicRequest(pathname, options = {}) {
   const base = adapterBase || (provider === 'qishui' && String(pathname).startsWith('/passport') ? 'https://api.qishui.com' : provider === 'qishui' ? QISHUI_ORIGIN : NETEASE_ORIGIN);
   const url = new URL(`${base}/${String(pathname).replace(/^\//, '')}`);
   Object.entries(options.search || {}).forEach(([key, value]) => { if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, String(value)); });
-  if (!adapterBase && provider === 'qishui') Object.entries(qishuiQuery()).forEach(([key, value]) => { if (!url.searchParams.has(key)) url.searchParams.set(key, String(value)); });
+  if (!adapterBase && provider === 'qishui' && !String(pathname).startsWith('/passport')) Object.entries(qishuiQuery()).forEach(([key, value]) => { if (!url.searchParams.has(key)) url.searchParams.set(key, String(value)); });
   const headers = { ...musicSessionHeaders(), ...(options.headers || {}) };
   if (options.flow) { delete headers.cookie; delete headers['x-session-id']; if (options.flow.cookie) headers.cookie = options.flow.cookie; }
   let body;
@@ -122,17 +132,48 @@ async function musicRequest(pathname, options = {}) {
   }
   if (!adapterBase && provider === 'netease') headers.referer = 'https://music.163.com/';
   if (!adapterBase && provider === 'qishui') headers.referer = 'https://qishui.com/';
+  if (!adapterBase && provider === 'qishui' && String(pathname).startsWith('/passport')) {
+    const csrf = cookieValue(headers.cookie, 'passport_csrf_token');
+    if (csrf) headers['x-tt-passport-csrf-token'] = csrf;
+    if (options.flow) {
+      const trace = crypto.randomBytes(4).toString('hex');
+      url.searchParams.set('biz_trace_id', trace);
+      url.searchParams.set('msToken', options.flow.msToken);
+      headers['x-tt-passport-trace-id'] = trace;
+      headers['x-tt-passport-verify-portrait'] = options.flow.verifyPortraitId;
+      if (body !== undefined) headers['x-ss-stub'] = crypto.createHash('md5').update(body).digest('hex').toUpperCase();
+    }
+  }
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
-  let response;
-  try { response = await fetch(url, { method: options.method || 'GET', headers, body, signal: controller.signal }); }
-  finally { clearTimeout(timeout); }
-  if (options.flow || provider === musicProvider()) mergeSetCookies(response.headers, options.flow);
-  const text = await response.text();
-  let payload;
-  try { payload = text ? JSON.parse(text) : {}; } catch { payload = { raw: text }; }
-  if (!response.ok) throw new Error(payload?.message || payload?.error || `音乐平台请求失败（${response.status}）`);
-  return payload;
+  try {
+    const request = !adapterBase && provider === 'qishui' && options.flow && String(pathname).startsWith('/passport')
+      ? qishuiSignedRequest(url, { method: options.method || 'GET', headers, body }, options.flow)
+      : { url, method: options.method || 'GET', headers, body };
+    const response = await fetch(request.url, { method: request.method, headers: request.headers, body: request.body, redirect: options.flow ? 'manual' : 'follow', signal: controller.signal });
+    if (options.flow || provider === musicProvider()) mergeSetCookies(response.headers, options.flow);
+    // Passport 可能先下发会话，再跳转到没有网页的 API 根地址。授权已完成时
+    // 直接交还会话，避免把落地页 404 当作扫码失败或再次消费二维码。
+    if (options.flow && provider === 'qishui' && String(pathname).includes('/check_qrconnect/') && (cookieValue(options.flow.cookie, 'sessionid') || cookieValue(options.flow.cookie, 'sessionid_ss'))) {
+      await response.body?.cancel();
+      return { data: { status: 'confirmed' } };
+    }
+    if (options.flow && provider === 'qishui' && response.status >= 300 && response.status < 400 && response.headers.get('location')) {
+      await response.body?.cancel();
+      return { data: { status: 'confirmed', redirect_url: new URL(response.headers.get('location'), url).href } };
+    }
+    const text = await response.text();
+    let payload;
+    try { payload = text ? JSON.parse(text) : {}; } catch { throw musicAuthError(provider, {}, response.status); }
+    if (!response.ok) throw musicAuthError(provider, payload, response.status);
+    return payload;
+  } catch (error) {
+    if (error.code && error.retryable !== undefined) throw error;
+    const failure = new Error(controller.signal.aborted ? '音乐平台响应超时，请稍后重试' : '无法连接音乐平台，请检查部署服务器的网络');
+    failure.code = controller.signal.aborted ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_NETWORK';
+    failure.retryable = true;
+    throw failure;
+  } finally { clearTimeout(timeout); }
 }
 function pickArray(value, keys = []) {
   if (Array.isArray(value)) return value;
@@ -200,7 +241,9 @@ async function ensureRandomMusicQueue() {
 async function syncMusicAccount() {
   if (!musicConfigured() || !musicLoggedIn()) return null;
   const provider = musicProvider();
-  const payload = provider === 'qishui' ? await musicRequest('/me') : await musicRequest(musicBaseUrl() ? '/user/account' : '/api/nuser/account/get');
+  const payload = provider === 'qishui'
+    ? await musicRequest(musicBaseUrl() ? '/auth/me' : '/me', { method: musicBaseUrl() ? 'POST' : 'GET', body: musicBaseUrl() ? { sessionid: db.settings.music.sessionId } : undefined })
+    : await musicRequest(musicBaseUrl() ? '/user/account' : '/weapi/nuser/account/get', musicBaseUrl() ? {} : { method: 'POST', form: neteaseWeapi({ csrf_token: cookieValue(db.settings.music.cookie, '__csrf') }) });
   if (provider !== musicProvider()) throw new Error('音乐平台已切换');
   const data = musicData(payload) || {};
   const profile = data.my_info || data.profile || data.account || data.user || data;
@@ -390,85 +433,150 @@ app.get('/api/music/random', async (_req, res) => {
   if (!queue.length) return res.status(404).json({ error: musicLoggedIn() ? '平台暂时没有返回随机歌曲' : '请先在后台连接音乐平台' });
   res.json({ queue: queue.slice(0, 300), playlistName: db.settings.music.playlistName || '平台随机音乐' });
 });
-app.get('/api/music/login/qr', requireAdmin, async (req, res) => {
-  try {
-    const provider = musicProvider();
-    const flow = { provider, generation: musicAuthGeneration, userId: req.user.userId, cookie: '', sessionId: '', expiresAt: Date.now() + 180000, confirmed: false };
-    let qr;
-    if (musicBaseUrl()) {
-      if (provider === 'qishui') qr = normalizeQr(await musicRequest('/auth/qrcode', { flow }));
-      else {
-        const key = normalizeQr(await musicRequest('/login/qr/key', { flow, search: { timestamp: Date.now() } })).token;
-        qr = normalizeQr(await musicRequest('/login/qr/create', { flow, search: { key, qrimg: 'true', timestamp: Date.now() } }));
-        qr.token = key;
-      }
-    } else if (provider === 'qishui') {
-      qr = normalizeQr(await musicRequest('/passport/web/get_qrcode/', { flow, search: { passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: 1, type: 1, need_logo: 'false', need_short_url: 'false', is_frontier: 'false', service: 'https://api.qishui.com', next: 'https://api.qishui.com' } }));
-    } else {
-      qr = normalizeQr(await musicRequest('/weapi/login/qrcode/unikey', { flow, method: 'POST', form: neteaseWeapi({ type: 1 }) }));
-      qr.url = NETEASE_ORIGIN + '/login?codekey=' + encodeURIComponent(qr.token);
+function removeMusicQrFlow(token) {
+  const flow = musicQrFlows.get(token);
+  if (flow) { clearTimeout(flow.expiryTimer); flow.cancelled = true; flow.signingRequest = null; flow.signedRequest = null; }
+  musicQrFlows.delete(token);
+}
+function clearMusicQrFlows() {
+  for (const token of musicQrFlows.keys()) removeMusicQrFlow(token);
+}
+function registerMusicQrFlow(req) {
+  for (const [token, flow] of musicQrFlows) if (flow.expiresAt < Date.now() || flow.userId === req.user.userId) removeMusicQrFlow(token);
+  const flow = { token: id(), provider: musicProvider(), generation: musicAuthGeneration, userId: req.user.userId, cookie: '', sessionId: '', expiresAt: Date.now() + 180000, confirmed: false, progress: 'pending', stage: 'create' };
+  flow.expiryTimer = setTimeout(() => removeMusicQrFlow(flow.token), 181000);
+  flow.expiryTimer.unref();
+  musicQrFlows.set(flow.token, flow);
+  return flow;
+}
+async function createMusicQr(flow) {
+  const provider = flow.provider;
+  let qr;
+  if (musicBaseUrl()) {
+    if (provider === 'qishui') qr = normalizeQr(await musicRequest('/auth/qrcode', { flow }));
+    else {
+      const key = normalizeQr(await musicRequest('/login/qr/key', { flow, search: { timestamp: Date.now() } })).token;
+      qr = normalizeQr(await musicRequest('/login/qr/create', { flow, search: { key, qrimg: 'true', timestamp: Date.now() } }));
+      qr.token = key;
     }
-    if (!qr.token || !(qr.image || qr.url)) throw new Error('音乐平台未返回完整二维码，请重试');
-    // 平台返回图片时直接使用；登录链接在服务端编码，避免误把网页地址当图片。
-    const candidate = qr.image || qr.url;
-    const qrCode = /^data:image\/(png|jpe?g|webp);base64,/i.test(candidate) ? candidate : await musicQrData(qr.url || candidate);
-    if (provider !== musicProvider() || flow.generation !== musicAuthGeneration) return res.status(409).json({ error: '音乐平台已切换，请重新获取二维码' });
-    for (const [key, entry] of musicQrFlows) if (entry.expiresAt < Date.now() || entry.userId === req.user.userId) musicQrFlows.delete(key);
-    const token = id();
-    flow.upstreamToken = qr.token;
-    flow.expiresAt = Math.min(Date.now() + 180000, qr.expiresAt);
-    musicQrFlows.set(token, flow);
-    res.json({ provider, providerLabel: provider === 'qishui' ? '汽水音乐' : '网易云音乐', token, qrCode, expiresAt: new Date(flow.expiresAt).toISOString() });
-  } catch (error) { res.status(502).json({ error: error.message }); }
+  } else if (provider === 'qishui') {
+    if (!flow.passportQuery) {
+      flow.passportQuery = qishuiPassportQuery();
+      flow.verifyPortraitId = crypto.randomUUID() + '.login';
+      flow.msToken = crypto.randomBytes(88).toString('base64url') + '==';
+      await saveDb(db);
+    }
+    qr = normalizeQr(await musicRequest('/passport/web/get_qrcode/', { flow, search: { ...flow.passportQuery, need_logo: 'false', need_short_url: 'false', is_new_login: '1', next: 'https://api.qishui.com' } }));
+  } else {
+    flow.cookie = `__remember_me=true; os=pc; appver=3.1.17.204416; channel=netease; deviceId=${musicDeviceId()}; _ntes_nuid=${crypto.randomBytes(16).toString('hex')}`;
+    qr = normalizeQr(await musicRequest('/weapi/login/qrcode/unikey', { flow, method: 'POST', form: neteaseWeapi({ type: 3, csrf_token: '' }) }));
+    qr.url = NETEASE_ORIGIN + '/login?codekey=' + encodeURIComponent(qr.token);
+  }
+  if (!qr.token || !(qr.image || qr.url)) throw new Error('音乐平台未返回完整二维码，请重试');
+  const candidate = qr.image || qr.url;
+  const qrCode = /^data:image\/(png|jpe?g|webp);base64,/i.test(candidate) ? candidate : await musicQrData(qr.url || candidate);
+  if (flow.cancelled || provider !== musicProvider() || flow.generation !== musicAuthGeneration) throw Object.assign(new Error('二维码已失效，请重新获取'), { status: 409 });
+  flow.upstreamToken = qr.token;
+  flow.expiresAt = Math.min(Date.now() + 180000, qr.expiresAt);
+  clearTimeout(flow.expiryTimer);
+  flow.expiryTimer = setTimeout(() => removeMusicQrFlow(flow.token), Math.max(0, flow.expiresAt - Date.now()) + 1000);
+  flow.expiryTimer.unref();
+  flow.stage = 'status';
+  return { provider, providerLabel: provider === 'qishui' ? '汽水音乐' : '网易云音乐', token: flow.token, qrCode, scanApp: qr.scanApp, expiresAt: new Date(flow.expiresAt).toISOString() };
+}
+async function respondMusicQr(flow, res) {
+  res.setHeader('cache-control', 'no-store');
+  try {
+    flow.pending ??= (flow.stage === 'create' ? createMusicQr(flow) : checkMusicQr(flow)).finally(() => { flow.pending = null; });
+    res.json(await flow.pending);
+  } catch (error) {
+    if (error.signing && !flow.cancelled) return res.json({ token: flow.token, signing: error.signing });
+    if (flow.stage === 'create') removeMusicQrFlow(flow.token);
+    res.status(error.status || 502).json({ error: error.message || '音乐登录请求失败', code: error.code, retryable: error.retryable ?? true });
+  }
+}
+app.get('/api/music/login/qr', requireAdmin, async (req, res) => {
+  await respondMusicQr(registerMusicQrFlow(req), res);
 });
 async function exchangeQishuiRedirect(flow, redirect) {
   let next = redirect;
+  const signal = AbortSignal.timeout(12000);
   for (let hop = 0; next && hop < 5; hop += 1) {
     const url = new URL(next, 'https://api.qishui.com');
-    if (url.protocol !== 'https:' || !(url.hostname === 'qishui.com' || url.hostname.endsWith('.qishui.com')) || url.username || url.password) throw new Error('平台返回了无效登录跳转');
-    flow.sessionId ||= url.searchParams.get('sessionid') || url.searchParams.get('session_id') || url.searchParams.get('sessionid_ss') || '';
-    const response = await fetch(url, { redirect: 'manual', headers: { cookie: flow.cookie || '', 'user-agent': musicSessionHeaders()['user-agent'] }, signal: AbortSignal.timeout(10000) });
+    if (url.protocol !== 'https:' || !['qishui.com', 'api.qishui.com', 'bff-pc.qishui.com', 'auth.zijieapi.com'].includes(url.hostname) || url.username || url.password) throw new Error('平台返回了无效登录跳转');
+    const response = await fetch(url, { redirect: 'manual', headers: { cookie: flow.cookie || '', 'user-agent': flow.userAgent || musicSessionHeaders()['user-agent'] }, signal });
     mergeSetCookies(response.headers, flow);
-    next = response.status >= 300 && response.status < 400 ? response.headers.get('location') : '';
+    if (cookieValue(flow.cookie, 'sessionid') || cookieValue(flow.cookie, 'sessionid_ss')) { await response.body?.cancel(); return; }
+    next = response.status >= 300 && response.status < 400 && response.headers.get('location') ? new URL(response.headers.get('location'), url).href : '';
+    if (!response.ok && !(response.status >= 300 && response.status < 400)) { await response.body?.cancel(); throw musicAuthError('qishui', {}, response.status); }
+    flow.sessionId ||= url.searchParams.get('sessionid') || url.searchParams.get('session_id') || url.searchParams.get('sessionid_ss') || '';
     await response.body?.cancel();
   }
+  if (next) throw new Error('汽水登录授权跳转次数过多，请重新生成二维码');
 }
 async function checkMusicQr(flow) {
   if (flow.confirmed) return { status: 'confirmed', loggedIn: true, account: db.settings.music.account };
+  if (flow.provider === 'qishui' && flow.nextCheckAt > Date.now() && flow.lastResult) return flow.lastResult;
   const adapter = Boolean(musicBaseUrl());
   let payload;
-  if (adapter) payload = flow.provider === 'qishui'
+  // 授权回调若暂时失败，重试该回调，避免再次读取已消费的二维码状态。
+  if (flow.redirect) payload = { data: { status: 'confirmed', redirect_url: flow.redirect, sessionid: flow.sessionId } };
+  else if (adapter) payload = flow.provider === 'qishui'
     ? await musicRequest('/auth/qrcode/status', { flow, method: 'POST', body: { token: flow.upstreamToken } })
     : await musicRequest('/login/qr/check', { flow, search: { key: flow.upstreamToken, timestamp: Date.now() } });
   else payload = flow.provider === 'qishui'
-    ? await musicRequest('/passport/web/check_qrconnect/', { flow, method: 'POST', search: { passport_jssdk_version: '2.4.13', passport_jssdk_type: 'normal', is_from_ttaccountsdk: 1 }, form: { token: flow.upstreamToken, type: '1', service: 'https://api.qishui.com', next: 'https://api.qishui.com', is_new_login: '1' } })
-    : await musicRequest('/weapi/login/qrcode/client/login', { flow, method: 'POST', form: neteaseWeapi({ key: flow.upstreamToken, type: 1 }) });
+    ? await musicRequest('/passport/web/check_qrconnect/', { flow, method: 'POST', search: flow.passportQuery, form: { token: flow.upstreamToken, need_logo: 'false', need_short_url: 'false', is_frontier: 'true', next: 'https://api.qishui.com', is_new_login: '1' } })
+    : await musicRequest('/weapi/login/qrcode/client/login', { flow, method: 'POST', form: neteaseWeapi({ key: flow.upstreamToken, type: 3, csrf_token: cookieValue(flow.cookie, '__csrf') }) });
   const result = qrStatus(flow.provider, payload, adapter);
   if (result.cookie) flow.cookie = mergeCookies(flow.cookie, result.cookie.split(';').map(value => value.trim()));
-  if (result.status !== 'confirmed') return { status: result.status };
-  if (flow.provider === 'qishui' && result.redirect) await exchangeQishuiRedirect(flow, result.redirect);
+  if (result.status === 'pending' && flow.progress === 'authorizing' && (flow.provider === 'qishui' ? cookieValue(flow.cookie, 'sessionid') || cookieValue(flow.cookie, 'sessionid_ss') : cookieValue(flow.cookie, 'MUSIC_U'))) result.status = 'confirmed';
+  if (result.status === 'scanned' && flow.progress !== 'authorizing') flow.progress = 'scanned';
+  if (result.status === 'confirmed') flow.progress = 'authorizing';
+  if (result.status !== 'confirmed') {
+    flow.lastResult = { status: result.status === 'pending' ? (flow.progress || 'pending') : result.status, message: result.message, retryAfterMs: result.retryAfterMs };
+    if (flow.provider === 'qishui') flow.nextCheckAt = Date.now() + (result.retryAfterMs || 2500);
+    return flow.lastResult;
+  }
+  if (flow.provider === 'qishui' && result.redirect && !(result.sessionId || cookieValue(flow.cookie, 'sessionid') || cookieValue(flow.cookie, 'sessionid_ss'))) {
+    flow.redirect = result.redirect;
+    await exchangeQishuiRedirect(flow, flow.redirect);
+    flow.redirect = '';
+  }
   flow.sessionId = result.sessionId || flow.sessionId || cookieValue(flow.cookie, 'sessionid') || cookieValue(flow.cookie, 'sessionid_ss') || '';
   const sessionId = flow.sessionId;
-  const credential = flow.provider === 'qishui' ? sessionId : cookieValue(flow.cookie, 'MUSIC_U') || cookieValue(flow.cookie, 'MUSIC_A');
-  if (!credential) return { status: 'scanned', message: '手机已确认，正在等待平台完成授权…' };
-  if (flow.provider !== musicProvider() || flow.generation !== musicAuthGeneration) return { status: 'expired' };
+  const credential = flow.provider === 'qishui' ? sessionId : cookieValue(flow.cookie, 'MUSIC_U');
+  if (!credential) return { status: 'authorizing', message: '手机已确认，正在等待平台完成授权…' };
+  if (flow.cancelled || flow.provider !== musicProvider() || flow.generation !== musicAuthGeneration) return { status: 'expired' };
+  if (flow.provider === 'qishui' && !cookieValue(flow.cookie, 'sessionid')) flow.cookie = mergeCookies(flow.cookie, [`sessionid=${sessionId}`]);
   db.settings.music.cookie = flow.cookie;
   db.settings.music.sessionId = flow.provider === 'qishui' ? sessionId : '';
   db.settings.music.account = null;
   await saveDb(db);
   flow.confirmed = true;
+  flow.signingRequest = null;
+  flow.signedRequest = null;
   // 资料、歌单查询失败不回滚已落盘的登录；由后续配置请求独立同步。
   return { status: 'confirmed', loggedIn: true, account: null };
 }
-app.get('/api/music/login/qr/status', requireAdmin, async (req, res) => {
-  const token = String(req.query.token || '');
+function findMusicQrFlow(req, res) {
+  const token = String(req.query.token || req.body?.token || '');
   const flow = musicQrFlows.get(token);
-  if (!flow || flow.userId !== req.user.userId) return res.status(404).json({ error: '二维码登录流程已失效，请重新获取' });
-  if (flow.expiresAt < Date.now() || flow.provider !== musicProvider()) { musicQrFlows.delete(token); return res.json({ status: 'expired' }); }
+  if (!flow || flow.userId !== req.user.userId) { res.status(404).json({ error: '二维码登录流程已失效，请重新获取' }); return null; }
+  if (flow.expiresAt < Date.now() || flow.provider !== musicProvider() || flow.generation !== musicAuthGeneration) { removeMusicQrFlow(token); res.json({ status: 'expired' }); return null; }
+  return flow;
+}
+app.get('/api/music/login/qr/status', requireAdmin, async (req, res) => {
+  const flow = findMusicQrFlow(req, res);
+  if (flow) await respondMusicQr(flow, res);
+});
+app.post('/api/music/login/qr/signature', requireAdmin, async (req, res) => {
+  const flow = findMusicQrFlow(req, res);
+  if (!flow) return;
   try {
-    flow.pending ??= checkMusicQr(flow).finally(() => { flow.pending = null; });
-    res.json(await flow.pending);
-  } catch (error) { res.status(502).json({ error: error.message }); }
+    if (flow.pending) return res.status(409).json({ error: '正在处理汽水登录请求，请稍后重试', retryable: true });
+    acceptQishuiSignature(flow, req.body || {});
+  } catch (error) { return res.status(400).json({ error: error.message, code: error.code, retryable: false }); }
+  await respondMusicQr(flow, res);
 });
 app.get('/api/music/playlists', requireAdmin, async (_req, res) => {
   try {
@@ -572,11 +680,11 @@ app.get('/api/music/track/:id/url', async (req, res) => {
     res.json({ url });
   } catch (error) { res.status(502).json({ error: error.message }); }
 });
-app.post('/api/music/logout', requireAdmin, async (_req, res) => { musicAuthGeneration += 1; musicQrFlows.clear(); db.settings.music.cookie = ''; db.settings.music.sessionId = ''; db.settings.music.account = null; db.settings.music.playlistId = ''; db.settings.music.playlistName = ''; db.settings.music.queue = []; await saveDb(db); res.json({ ok: true }); });
+app.post('/api/music/logout', requireAdmin, async (_req, res) => { musicAuthGeneration += 1; clearMusicQrFlows(); db.settings.music.cookie = ''; db.settings.music.sessionId = ''; db.settings.music.account = null; db.settings.music.playlistId = ''; db.settings.music.playlistName = ''; db.settings.music.queue = []; await saveDb(db); res.json({ ok: true }); });
 app.put('/api/admin/music/provider', requireAdmin, async (req, res) => {
   const provider = ['netease', 'qishui'].includes(req.body?.provider) ? req.body.provider : 'netease';
   if (provider !== db.settings.music.provider) {
-    musicAuthGeneration += 1; musicQrFlows.clear();
+    musicAuthGeneration += 1; clearMusicQrFlows();
     db.settings.music.provider = provider;
     db.settings.music.cookie = '';
     db.settings.music.sessionId = '';

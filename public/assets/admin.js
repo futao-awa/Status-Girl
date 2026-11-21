@@ -56,7 +56,7 @@ async function api(url, options = {}) {
   try {
     const response = await fetch(url, {
       credentials: 'same-origin',
-      signal: AbortSignal.timeout(url.includes('check-now') ? 65000 : 20000),
+      signal: AbortSignal.timeout(url.includes('check-now') || url.includes('/music/login/qr') ? 65000 : 20000),
       cache: 'no-store',
       ...options,
       headers: { 'content-type': 'application/json', ...(options.headers || {}) }
@@ -66,7 +66,12 @@ async function api(url, options = {}) {
       showLogin();
       throw new Error(data.error || '登录已过期');
     }
-    if (!response.ok) throw new Error(data.error || '请求失败');
+    if (!response.ok) {
+      const error = new Error(typeof data.error === 'string' && data.error ? data.error : `请求失败（HTTP ${response.status}）`);
+      error.retryable = data.retryable ?? response.status >= 500;
+      error.code = data.code;
+      throw error;
+    }
     return data;
   } catch (error) {
     throw error;
@@ -259,21 +264,27 @@ function renderMusicAdmin() {
   const settings = state?.settings?.music || {};
   const provider = settings.provider || 'netease';
   if ($('#musicProvider')) $('#musicProvider').value = provider;
-  const loggedIn = Boolean(settings.loggedIn || settings.account);
+  const loggedIn = Boolean(settings.loggedIn);
   const status = $('#musicAdminStatus');
   if (status) { status.textContent = loggedIn ? '已连接' : '未连接'; status.classList.toggle('ready', loggedIn); }
-  if ($('#musicAdminAccount')) $('#musicAdminAccount').textContent = settings.account?.name || (loggedIn ? '已登录，账号资料稍后同步' : '未登录');
+  if ($('#musicAdminAccount')) $('#musicAdminAccount').textContent = loggedIn ? settings.account?.name || '已登录，账号资料稍后同步' : '未登录';
   if ($('#musicAdminPlaylist')) $('#musicAdminPlaylist').textContent = settings.playlistName ? `随机队列 · ${settings.playlistName}` : '随机音乐（未选择歌单）';
   if ($('#musicRandomToggle')) { $('#musicRandomToggle').setAttribute('aria-checked', String(settings.randomEnabled !== false)); $('#musicRandomToggle').title = settings.randomEnabled === false ? '启用随机音乐' : '停用随机音乐'; }
   if ($('#musicSourceLabel')) $('#musicSourceLabel').textContent = settings.playlistName || (settings.randomEnabled !== false ? '平台随机音乐' : '自选队列');
   if ($('#musicQueueCount')) $('#musicQueueCount').textContent = String((settings.queue || []).length);
   if ($('#musicRandomState')) $('#musicRandomState').textContent = settings.randomEnabled === false ? '随机音乐已停用，主页按队列顺序播放。' : (settings.playlistName ? `当前使用：${settings.playlistName} · 随机播放` : '未选择歌单时自动使用平台随机音乐。');
   renderMusicQueue();
-  const signature = JSON.stringify([provider, settings.account?.id || settings.account?.name, settings.playlistId, settings.randomEnabled, settings.queue || []]);
+  const signature = JSON.stringify([provider, loggedIn, settings.account?.id || settings.account?.name, settings.playlistId, settings.randomEnabled, settings.queue || []]);
   if (musicQueueSignature !== signature) {
     musicQueueSignature = signature;
     api('/api/music/config').then((config) => {
-      if (musicQueueSignature === signature) window.platformMusicPlayer?.updateQueue(config.queue, config);
+      if (musicQueueSignature === signature) {
+        window.platformMusicPlayer?.updateQueue(config.queue, config);
+        if (config.loggedIn && config.account && state?.settings?.music?.provider === provider) {
+          state.settings.music.account = config.account;
+          if ($('#musicAdminAccount')) $('#musicAdminAccount').textContent = config.account.name;
+        }
+      }
     }).catch((error) => {
       if (musicQueueSignature === signature) musicQueueSignature = '';
       toast(error.message, true);
@@ -305,10 +316,23 @@ async function changeMusicProvider() {
 function stopMusicQr() {
   musicQrGeneration += 1;
   window.clearTimeout(musicQrTimer);
+  window.qishuiSigning?.dispose();
   const button = $('#musicQrButton');
   if (button) { button.disabled = false; button.textContent = '扫码登录'; }
   const box = $('#musicQrBox');
   if (box) box.hidden = true;
+}
+async function musicQrRequest(url, active) {
+  let result = await api(url);
+  for (let attempt = 0; result.signing && attempt < 3; attempt += 1) {
+    if (!active()) return result;
+    if (!window.qishuiSigning) throw new Error('汽水扫码组件未加载，请刷新后台后重试');
+    const signature = await window.qishuiSigning.sign(result.signing);
+    if (!active()) return result;
+    result = await api('/api/music/login/qr/signature', { method: 'POST', body: JSON.stringify({ token: result.token, requestId: result.signing.requestId, ...signature }) });
+  }
+  if (result.signing && active()) throw new Error('汽水签名未完成，请重新生成二维码');
+  return result;
 }
 async function startMusicQr() {
   stopMusicQr();
@@ -319,38 +343,47 @@ async function startMusicQr() {
   button.disabled = true;
   button.textContent = '生成中…';
   try {
-    const result = await api('/api/music/login/qr');
+    const result = await musicQrRequest('/api/music/login/qr', active);
     if (!active()) return;
     $('#musicQrBox').hidden = false;
     $('#musicQrImage').src = result.qrCode;
     $('#musicQrImage').onerror = () => { $('#musicQrHint').textContent = '二维码图片加载失败，请重新生成'; };
-    $('#musicQrHint').textContent = provider === 'qishui' ? '使用汽水音乐或抖音扫码，按手机提示确认登录' : '使用网易云音乐扫码，并在手机上确认登录';
+    $('#musicQrHint').textContent = provider === 'qishui' ? (result.scanApp === 'douyin' ? '请使用已登录的抖音 APP 扫码，并在手机上确认登录' : '请按二维码页面提示选择 APP 扫码，并在手机上确认登录') : '使用网易云音乐扫码，并在手机上确认登录';
     let failures = 0;
+    let progress = 'pending';
     const poll = async () => {
       if (!active()) return;
-      if (Date.now() >= Date.parse(result.expiresAt)) { $('#musicQrHint').textContent = '二维码已过期，请重新生成'; return; }
+      if (Date.now() >= Date.parse(result.expiresAt)) { window.qishuiSigning?.dispose(); $('#musicQrHint').textContent = '二维码已过期，请重新生成'; return; }
+      let retryAfterMs = 1500;
       try {
-        const status = await api('/api/music/login/qr/status?token=' + encodeURIComponent(result.token));
+        const status = await musicQrRequest('/api/music/login/qr/status?token=' + encodeURIComponent(result.token), active);
         if (!active()) return;
         failures = 0;
-        if (status.status === 'confirmed') {
+        if (status.status === 'confirmed' && status.loggedIn) {
+          window.qishuiSigning?.dispose();
           $('#musicQrBox').hidden = true;
           if (state?.settings?.music) { state.settings.music.loggedIn = true; state.settings.music.account = status.account; renderMusicAdmin(); }
           toast('音乐平台登录成功');
           reload().then(() => { if (active()) loadMusicPlaylists(); }).catch(error => toast('已登录，界面同步失败：' + error.message, true));
           return;
         }
-        $('#musicQrHint').textContent = status.message || (status.status === 'scanned' ? '已扫码，请在手机上确认登录…' : status.status === 'expired' ? '二维码已过期，请重新生成' : '等待扫码…');
-        if (status.status === 'expired') return;
+        if (status.status === 'scanned' && progress !== 'authorizing') progress = 'scanned';
+        if (status.status === 'authorizing' || status.status === 'confirmed') progress = 'authorizing';
+        const visible = status.status === 'pending' ? progress : status.status;
+        $('#musicQrHint').textContent = status.message || (visible === 'authorizing' ? '手机已确认，正在完成登录授权…' : visible === 'scanned' ? '已扫码，请在手机上确认登录…' : visible === 'expired' ? '二维码已过期，请重新生成' : '等待扫码…');
+        if (status.status === 'expired' || status.status === 'verification_required') { window.qishuiSigning?.dispose(); return; }
+        retryAfterMs = Math.max(1500, Math.min(10000, Number(status.retryAfterMs) || 1500));
       } catch (error) {
         if (!active()) return;
         failures += 1;
+        if (error.retryable === false) { window.qishuiSigning?.dispose(); $('#musicQrHint').textContent = error.message + '，请重新生成二维码'; return; }
         $('#musicQrHint').textContent = '连接暂时中断，正在重试：' + error.message;
+        retryAfterMs = Math.min(6000, 1500 + failures * 1000);
       }
-      if (active()) musicQrTimer = window.setTimeout(poll, Math.min(6000, 1500 + failures * 1000));
+      if (active()) musicQrTimer = window.setTimeout(poll, retryAfterMs);
     };
     musicQrTimer = window.setTimeout(poll, 1000);
-  } catch (error) { if (active()) toast(error.message, true); }
+  } catch (error) { if (active()) { window.qishuiSigning?.dispose(); toast(error.message, true); } }
   finally { if (generation === musicQrGeneration) { button.disabled = false; button.textContent = '重新生成二维码'; } }
 }
 
@@ -427,6 +460,9 @@ async function reload() {
   if (touchDragKind || monitorDragId || categoryDragId || sortSaving) return;
   const data = await api('/api/admin/state');
   if (touchDragKind || monitorDragId || categoryDragId || sortSaving) return;
+  const previousMusic = state?.settings?.music;
+  const nextMusic = data.settings?.music;
+  if (nextMusic?.loggedIn && previousMusic?.loggedIn && nextMusic.provider === previousMusic.provider && !nextMusic.account) nextMusic.account = previousMusic.account;
   state = data;
   window.PageAppearance?.apply(state.settings);
   render(); renderApiDocs();

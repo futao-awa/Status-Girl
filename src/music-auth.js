@@ -15,27 +15,64 @@ export function cookieValue(cookie, name) {
   const part = String(cookie || '').split(';').map(value => value.trim()).find(value => value.startsWith(name + '='));
   return part ? part.slice(name.length + 1) : '';
 }
+// 直连、API 适配服务可能各包一层 data/body；只沿响应封装读取。
+function responseLayers(payload) {
+  const layers = [];
+  let value = payload;
+  for (let depth = 0; value && typeof value === 'object' && !Array.isArray(value) && depth < 6; depth += 1) {
+    layers.push(value);
+    value = value.data ?? value.body;
+  }
+  return layers.reverse();
+}
+function field(layers, names) {
+  for (const layer of layers) for (const name of names) if (layer[name] !== undefined && layer[name] !== null && layer[name] !== '') return layer[name];
+  return '';
+}
+export function musicAuthError(provider, payload, httpStatus = 200) {
+  const layers = responseLayers(payload);
+  const code = field(layers, ['error_code']) || (provider === 'netease' ? field(layers, ['code']) : '');
+  const label = provider === 'qishui' ? '汽水音乐' : '网易云音乐';
+  // 保留可诊断的状态码；不把平台响应中的 token、Cookie 或跳转地址回显给前端。
+  const message = code ? `${label}登录接口返回错误（${code}）` : `${label}登录接口请求失败（HTTP ${httpStatus}）`;
+  const error = new Error(message);
+  error.code = String(code || 'UPSTREAM_ERROR');
+  error.retryable = httpStatus === 429 || httpStatus >= 500 || String(code) === '7';
+  return error;
+}
 export function normalizeQr(payload) {
-  const data = payload?.data ?? payload ?? {};
-  if (payload?.message === 'error' || Number(data.error_code) > 0) throw new Error(data.description || payload.message || '音乐平台拒绝生成二维码');
+  const layers = responseLayers(payload);
+  if (Number(field(layers, ['error_code'])) > 0 || layers.some(layer => layer.message === 'error')) throw musicAuthError('qishui', payload);
+  const expiry = Number(field(layers, ['expire_time', 'expiresAt']));
+  const copywriting = String(field(layers, ['copywriting']));
   return {
-    token: String(data.token ?? data.qr_token ?? data.qrcode_token ?? data.qrcode_id ?? data.unikey ?? data.key ?? ''),
-    image: String(data.qrcode ?? data.qrCode ?? data.qr_code ?? data.qrimg ?? ''),
-    url: String(data.qrcode_index_url ?? data.qrcode_url ?? data.qr_code_url ?? data.qrurl ?? data.login_url ?? ''),
-    expiresAt: Number(data.expire_time) > 0 ? Number(data.expire_time) * 1000 : Date.now() + 180000
+    token: String(field(layers, ['token', 'qr_token', 'qrcode_token', 'qrcode_id', 'unikey', 'key'])),
+    image: String(field(layers, ['qrcode', 'qrCode', 'qr_code', 'qrimg'])),
+    url: String(field(layers, ['qrcode_index_url', 'qrcode_url', 'qr_code_url', 'qrurl', 'login_url'])),
+    expiresAt: expiry > 0 ? (expiry > 1e12 ? expiry : expiry * 1000) : Date.now() + 180000,
+    scanApp: copywriting.includes('抖音') || field(layers, ['scan_app']) === 'douyin' ? 'douyin' : ''
   };
 }
-export function qrStatus(provider, payload, adapter = false) {
-  const data = payload?.data ?? payload ?? {};
+export function qrStatus(provider, payload) {
+  const layers = responseLayers(payload);
+  const cookie = field(layers, ['cookie', 'session_cookie']);
+  const result = { cookie: Array.isArray(cookie) ? cookie.map(line => String(line).split(';', 1)[0]).join('; ') : String(cookie), sessionId: '', redirect: '' };
   if (provider === 'netease') {
-    const code = Number(data.code ?? payload?.code ?? 801);
-    return { status: code === 803 ? 'confirmed' : code === 802 ? 'scanned' : code === 800 ? 'expired' : 'pending', cookie: String(payload?.cookie ?? data.cookie ?? ''), sessionId: '', redirect: '' };
+    const code = layers.map(layer => Number(layer.code)).find(code => [800, 801, 802, 803].includes(code));
+    if (!code) throw musicAuthError(provider, payload);
+    return { ...result, status: code === 803 ? 'confirmed' : code === 802 ? 'scanned' : code === 800 ? 'expired' : 'pending' };
   }
-  if (payload?.message === 'error' || Number(data.error_code) > 0) throw new Error(data.description || '汽水扫码状态获取失败');
-  const value = String(data.status ?? data.state ?? data.code ?? payload?.status ?? payload?.code ?? '').toLowerCase();
-  const sessionId = String(data.sessionid ?? data.sessionId ?? data.session_id ?? data.sessionid_ss ?? data.session_id_ss ?? data.auth?.sessionid ?? data.auth?.sessionId ?? data.auth?.session_id ?? payload?.sessionid ?? payload?.sessionId ?? payload?.session_id ?? '');
-  const confirmed = sessionId || ['confirmed', 'success', 'login', 'confirmed_login', '2'].includes(value);
-  const expired = ['expired', 'expire', 'invalid', 'cancelled', 'canceled', '3', '4'].includes(value);
-  const scanned = ['scanned', 'scan', 'scanned_qrcode', '1'].includes(value);
-  return { status: confirmed ? 'confirmed' : expired ? 'expired' : scanned ? 'scanned' : 'pending', sessionId, cookie: String(data.cookie ?? payload?.cookie ?? ''), redirect: String(data.redirect_url ?? data.redirectUrl ?? payload?.redirect_url ?? payload?.redirectUrl ?? '') };
+  const value = String(field(layers, ['status', 'state'])).toLowerCase();
+  const sessionNames = ['sessionid', 'sessionId', 'session_id', 'sessionid_ss', 'session_id_ss'];
+  const sessionId = String(field(layers, sessionNames) || field(layers.map(layer => layer.auth || {}), sessionNames));
+  const credential = sessionId || cookieValue(result.cookie, 'sessionid') || cookieValue(result.cookie, 'sessionid_ss');
+  const errorCode = Number(field(layers, ['error_code']));
+  if (errorCode === 2) return { ...result, status: 'expired' };
+  if (errorCode === 7 && !credential) return { ...result, status: 'retrying', retryAfterMs: 5000, message: '平台请求较频繁，5 秒后继续检查…' };
+  if (errorCode === 2046) return { ...result, status: 'verification_required', message: '平台要求额外身份验证，请在抖音 APP 完成验证后重新生成二维码。' };
+  if (!credential && (errorCode > 0 || layers.some(layer => layer.message === 'error'))) throw musicAuthError(provider, payload);
+  const states = { new: 'pending', waiting: 'pending', pending: 'pending', '1': 'pending', scanned: 'scanned', scan: 'scanned', scanned_qrcode: 'scanned', '2': 'scanned', confirm: 'confirmed', confirmed: 'confirmed', success: 'confirmed', login: 'confirmed', confirmed_login: 'confirmed', '3': 'confirmed', expired: 'expired', expire: 'expired', invalid: 'expired', cancelled: 'expired', canceled: 'expired', '4': 'expired' };
+  const status = credential ? 'confirmed' : states[value];
+  if (!status) throw musicAuthError(provider, payload);
+  return { ...result, status, sessionId, redirect: String(field(layers, ['redirect_url', 'redirectUrl'])) };
 }

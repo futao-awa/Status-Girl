@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "Status姬 API",
-    "version": "1.0.1",
+    "version": "1.0.2",
     "description": "面向机器人、脚本与外部系统的只读查询接口。除健康检查外，使用 Bearer Token 或 X-API-Key 鉴权。\n\n在后台生成只读 API Token，通过 Authorization: Bearer 或 X-API-Key 请求头传入。\n\n响应时间采用 ISO 8601 UTC；latency 和 durationMs 单位为毫秒，uptime 单位为秒。示例数据仅用于说明结构，不代表当前监控结果。\n\n每 IP 每分钟最多 120 次请求，建议每 30–60 秒轮询，网络错误与 5xx 时退避重试。",
     "license": {
       "name": "MIT",

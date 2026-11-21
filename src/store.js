@@ -79,6 +79,7 @@ function migrate(db) {
   db.settings.music.randomEnabled = !db.settings.music.queue.length || db.settings.music.randomEnabled !== false;
   db.settings.music.playMode = ['random', 'sequential'].includes(db.settings.music.playMode) ? db.settings.music.playMode : 'random';
   db.settings.music.deviceId = String(db.settings.music.deviceId || '');
+  db.settings.music.installId = String(db.settings.music.installId || '');
   db.users ??= [];
   db.categories ??= [];
   db.categories.forEach((category, index) => { category.sort = Number.isFinite(Number(category.sort)) ? Number(category.sort) : index; });
