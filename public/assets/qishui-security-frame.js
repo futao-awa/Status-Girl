@@ -134,7 +134,7 @@
     window.ucSecondVerifyReactDom = window.ReactDOM;
     const decision = config.decision;
     const resource = new URL(config.scriptUrl);
-    if (resource.protocol !== 'https:' || !/\.(?:bytescm\.com|bytetos\.com|yhgfb-cn-static\.com|bytegoofy\.com|byteimg\.com|bytednsdoc\.com)$/.test(resource.hostname)) throw new Error('官方验证组件地址无效');
+    if (resource.protocol !== 'https:' || !/\.(?:bytescm\.com|bytetos\.com|yhgfb-cn-static\.com|bytegoofy\.com|byteimg\.com|bytednsdoc\.com|zijieapi\.com)$/.test(resource.hostname)) throw new Error('官方验证组件地址无效');
     const object = value => { if (typeof value === 'string') { try { value = JSON.parse(value); } catch { return {}; } } return value && typeof value === 'object' ? value : {}; };
     const events = object(decision.event_params);
     resource.searchParams.set('aid', '386088');

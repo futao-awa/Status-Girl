@@ -3,7 +3,7 @@ import { cookieValue } from './music-auth.js';
 
 const apiHosts = new Set(['api.qishui.com', 'auth.zijieapi.com', 'bff-pc.qishui.com']);
 const captchaHosts = new Set(['verify.snssdk.com', 'verify.zijieapi.com']);
-const assetHost = /\.(?:bytescm\.com|bytetos\.com|yhgfb-cn-static\.com|bytegoofy\.com|byteimg\.com|bytednsdoc\.com)$/;
+const assetHost = /\.(?:bytescm\.com|bytetos\.com|yhgfb-cn-static\.com|bytegoofy\.com|byteimg\.com|bytednsdoc\.com|zijieapi\.com)$/;
 const credentialFields = /^(?:cookie|session_cookie|sessionid|sessionid_ss|session_id|session_id_ss|sid_guard|sid_tt|auth|__proto__|constructor|prototype)$/i;
 
 export function verificationObject(value) {
@@ -26,7 +26,7 @@ export function verificationScript(value) {
     }
     url = new URL(String(value), 'https://api.qishui.com');
   } catch { throw new Error('平台未返回可用的身份验证组件，请重新扫码'); }
-  if (url.protocol !== 'https:' || url.username || url.password || url.port || !assetHost.test(url.hostname) || !/^\/(?:obj|static)\/.*\.js$/.test(url.pathname)) throw new Error('平台返回的身份验证组件地址不受支持');
+  if (url.protocol !== 'https:' || url.username || url.password || url.port || !assetHost.test(url.hostname) || !/^\/(?:(?:obj|static|ucenter_web)\/.*)\.js$/.test(url.pathname)) throw new Error('平台返回的身份验证组件地址不受支持');
   return url.href;
 }
 export function verificationRequest(input, flow) {
@@ -34,7 +34,7 @@ export function verificationRequest(input, flow) {
   let url;
   try { url = new URL(String(request.url)); } catch { throw new Error('身份验证请求地址无效'); }
   // 仅允许官方身份验证接口，拒绝任意代理、授权跳转及登录/账号修改接口。
-  const passport = apiHosts.has(url.hostname) && /^\/passport\/(?:safe|verify|web\/(?:sms|captcha|verify|verification|safe))\/[a-z0-9_/-]+\/$/i.test(url.pathname);
+  const passport = apiHosts.has(url.hostname) && (/^\/passport\/(?:safe|verify|upsms|mobile|web\/(?:sms|captcha|verify|verification|safe|account|email|mobile))\/[a-z0-9_/-]+\/$/i.test(url.pathname) || /^\/passport\/web\/(?:send_code|send_voice_code|validate_code|get_qrcode)\/[a-z0-9_/-]*$/i.test(url.pathname));
   const captcha = captchaHosts.has(url.hostname) && /^\/captcha\/(?:get|verify|refresh)\/?$/.test(url.pathname);
   if (url.protocol !== 'https:' || url.username || url.password || url.port || !(passport || captcha)) throw new Error('身份验证请求超出允许范围');
   if (url.searchParams.has('aid') && url.searchParams.get('aid') !== '386088') throw new Error('身份验证应用不匹配');

@@ -76,7 +76,8 @@ export function playback(payload) {
     const duration = Number(model.video_duration || 0);
     const track = data.seo_track?.track || data.track || {};
     const fullDuration = Number(track.duration || 0) / 1000;
-    return { url: httpUrl(stream.main_url) || httpUrl(stream.backup_url), duration, preview: fullDuration > 0 && duration > 0 && duration + 3 < fullDuration };
+    const candidates = [...new Set(playable.flatMap(item => [httpUrl(item.main_url), httpUrl(item.backup_url)]).filter(Boolean))];
+    return { url: candidates[0] || '', candidates, duration, preview: fullDuration > 0 && duration > 0 && duration + 3 < fullDuration };
   }
   if (streams.length) return { url: '' };
   if (Array.isArray(data)) return data.map(playback).find(value => value.url) || { url: '' };

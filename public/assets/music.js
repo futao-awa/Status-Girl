@@ -23,7 +23,7 @@
       this.time = root.querySelector('#musicTime');
       this.audio = new Audio();
       this.audio.preload = 'metadata';
-      this.config = { configured: true, loggedIn: false, providerLabel: '平台音乐', playlistName: '', queue: [], randomEnabled: true, playMode: 'random' };
+      this.config = { configured: true, loggedIn: false, providerLabel: '平台音乐', playlistName: '', queue: [], randomEnabled: true, playMode: 'random', skipOnError: true };
       this.queue = [];
       this.trackIndex = -1;
       this.history = [];
@@ -36,6 +36,8 @@
       this.scrubbing = false;
       this.previewTime = null;
       this.isPreview = false;
+      this.errorStreak = 0;
+      this.skipTimer = null;
       this.bind();
       this.loadConfig();
     }
@@ -71,9 +73,16 @@
       this.audio.addEventListener('durationchange', () => this.renderProgress());
       this.audio.addEventListener('emptied', () => this.renderProgress());
       this.audio.addEventListener('ended', () => this.handleEnded());
-      this.audio.addEventListener('play', () => { this.isPlaying = true; this.autoplayBlocked = false; this.setState(this.isPreview ? '正在试听 · 完整播放受平台限制' : '正在播放'); this.render(); });
+      this.audio.addEventListener('play', () => { this.isPlaying = true; this.autoplayBlocked = false; this.errorStreak = 0; if (this.skipTimer) { clearTimeout(this.skipTimer); this.skipTimer = null; } this.setState(this.isPreview ? '正在试听 · 完整播放受平台限制' : '正在播放'); this.render(); });
       this.audio.addEventListener('pause', () => { this.isPlaying = false; if (!this.loadingTrack && !this.audio.ended) this.setState('已暂停'); this.render(); });
-      this.audio.addEventListener('error', () => { this.isPlaying = false; this.setState('当前音源无法播放 · 请切换歌曲'); this.render(); });
+      this.audio.addEventListener('error', () => {
+        this.isPlaying = false;
+        if (this.config.skipOnError !== false && this.queue.length > 1) {
+          this.setState('当前音源无法播放 · 自动切换下一首…');
+          this.render();
+          this.skipAfterError();
+        } else { this.setState('当前音源无法播放 · 请切换歌曲'); this.render(); }
+      });
       const resumeAutoplay = (event) => {
         if (!event.isTrusted || !this.autoplayBlocked || !this.audio.src || this.root.contains(event.target)) return;
         this.audio.play().catch(() => {});
@@ -170,7 +179,14 @@
           try { await this.audio.play(); }
           catch (error) { this.autoplayBlocked = error.name === 'NotAllowedError'; this.setState(this.autoplayBlocked ? '自动播放受限 · 点击页面后播放' : error.message); }
         }
-      } catch (error) { this.setState(error.message); this.isPlaying = false; this.render(); }
+      } catch (error) {
+        this.isPlaying = false;
+        if (this.config.skipOnError !== false && this.queue.length > 1 && error.name !== 'NotAllowedError') {
+          this.setState(error.message + ' · 自动切换下一首…');
+          this.render();
+          this.skipAfterError();
+        } else { this.setState(error.message); this.render(); }
+      }
       finally { this.loadingTrack = false; this.render(); }
     }
 
@@ -211,6 +227,22 @@
     toggleRepeat() {
       this.repeatMode = this.repeatMode === 'off' ? 'all' : this.repeatMode === 'all' ? 'one' : 'off';
       this.render();
+    }
+
+    skipAfterError() {
+      this.errorStreak += 1;
+      if (this.skipTimer) clearTimeout(this.skipTimer);
+      if (this.errorStreak >= Math.min(this.queue.length || 1, 6)) {
+        this.setState('连续多首无法播放 · 已停止自动切换');
+        this.render();
+        return;
+      }
+      const index = this.nextIndex(false);
+      if (index < 0 || index === this.trackIndex) { this.setState('没有可切换的歌曲'); return; }
+      this.skipTimer = setTimeout(() => {
+        this.skipTimer = null;
+        if (!this.isPlaying && !this.loadingTrack) this.playTrack(index, true, false);
+      }, 1200);
     }
 
     async handleEnded() {

@@ -192,3 +192,9 @@ test('网易云及外部汽水适配器仍使用各自接口与音源结构', as
   const adapter = await fixture(t, (call, res) => { assert.equal(call.url.pathname, '/download/url'); json(res, { data: { audio_url: 'https://example.com/adapter.mp3' } }); }, 'qishui', true);
   assert.equal((await adapter.request('/api/music/track/1/url')).data.url, 'https://example.com/adapter.mp3');
 });
+
+test('音源解析保留主备地址供转发回退', () => {
+  const result = musicContent.playback({ track_player: { video_model: JSON.stringify({ video_duration: 30, video_list: [{ main_url: 'https://a.douyinvod.com/main.m4a', backup_url: 'https://b.douyinvod.com/backup.m4a' }] }) } });
+  assert.equal(result.url, 'https://a.douyinvod.com/main.m4a');
+  assert.deepEqual(result.candidates, ['https://a.douyinvod.com/main.m4a', 'https://b.douyinvod.com/backup.m4a']);
+});

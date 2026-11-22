@@ -270,6 +270,7 @@ function renderMusicAdmin() {
   if ($('#musicAdminAccount')) $('#musicAdminAccount').textContent = loggedIn ? settings.account?.name || '已登录，账号资料稍后同步' : '未登录';
   if ($('#musicAdminPlaylist')) $('#musicAdminPlaylist').textContent = settings.playlistName ? `随机队列 · ${settings.playlistName}` : '随机音乐（未选择歌单）';
   if ($('#musicRandomToggle')) { $('#musicRandomToggle').setAttribute('aria-checked', String(settings.randomEnabled !== false)); $('#musicRandomToggle').title = settings.randomEnabled === false ? '启用随机音乐' : '停用随机音乐'; }
+  if ($('#musicSkipToggle')) { $('#musicSkipToggle').setAttribute('aria-checked', String(settings.skipOnError !== false)); $('#musicSkipToggle').title = settings.skipOnError === false ? '启用播放失败自动切歌' : '停用播放失败自动切歌'; }
   if ($('#musicSourceLabel')) $('#musicSourceLabel').textContent = settings.playlistName || (settings.randomEnabled !== false ? '平台随机音乐' : '自选队列');
   if ($('#musicQueueCount')) $('#musicQueueCount').textContent = String((settings.queue || []).length);
   if ($('#musicRandomState')) $('#musicRandomState').textContent = settings.randomEnabled === false ? '随机音乐已停用，主页按队列顺序播放。' : (settings.playlistName ? `当前使用：${settings.playlistName} · 随机播放` : '未选择歌单时自动使用平台随机音乐。');
@@ -304,6 +305,11 @@ function renderMusicQueue() {
 async function toggleMusicRandom() {
   const enabled = state?.settings?.music?.randomEnabled === false;
   try { const result = await api('/api/admin/music/random', { method: 'PUT', body: JSON.stringify({ enabled }) }); await reload(); toast(result.randomEnabled ? '随机音乐已启用（空队列自动启用）' : '随机音乐已停用'); } catch (error) { toast(error.message, true); }
+}
+
+async function toggleMusicSkip() {
+  const enabled = state?.settings?.music?.skipOnError === false;
+  try { const result = await api('/api/admin/music/skip-on-error', { method: 'PUT', body: JSON.stringify({ enabled }) }); await reload(); toast(result.skipOnError ? '播放失败将自动切换下一首' : '播放失败自动切歌已停用'); } catch (error) { toast(error.message, true); }
 }
 
 async function removeMusicTrack(button) {
@@ -566,6 +572,7 @@ $('#musicLogoutButton')?.addEventListener('click', logoutMusic);
 $('#musicSearchForm')?.addEventListener('submit', searchMusic);
 $('#musicClearQueue')?.addEventListener('click', clearMusicQueue);
 $('#musicRandomToggle')?.addEventListener('click', toggleMusicRandom);
+$('#musicSkipToggle')?.addEventListener('click', toggleMusicSkip);
 
 $$('.nav-item').forEach((button) => button.addEventListener('click', () => selectTab(button.dataset.tab)));
 $$('[data-go]').forEach((button) => button.addEventListener('click', () => selectTab(button.dataset.go)));

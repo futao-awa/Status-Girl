@@ -65,7 +65,7 @@
       frame.sandbox = 'allow-scripts';
       frame.referrerPolicy = 'no-referrer';
       frame.title = '汽水音乐官方身份验证';
-      frame.src = '/qishui-signing.html?v=1.0.3';
+      frame.src = '/qishui-signing.html?v=1.0.5';
       dialog = document.createElement('div');
       dialog.className = 'qishui-verification-dialog hidden';
       dialog.setAttribute('role', 'dialog');

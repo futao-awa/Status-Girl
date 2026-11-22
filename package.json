@@ -1,6 +1,6 @@
 {
   "name": "status-girl",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "private": true,
   "description": "Status姬：面向个人服务器与小型团队的轻量服务监控与状态页",
   "type": "module",

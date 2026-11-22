@@ -528,3 +528,18 @@ test('前端自动打开二次验证，取消后可继续；提交暂时失败�
   assert.equal(successes, 1);
   assert.equal(elements['#musicQrBox'].hidden, true);
 });
+
+test('身份验证组件地址与转发范围覆盖官方二次验证组件的真实接口', () => {
+  const { verificationScript, verificationRequest } = verificationHelpers;
+  const flow = { userAgent: 'UA', cookie: 'a=1', verifyPortraitId: 'portrait', verification: { decision: { verify_portrait_id: 'portrait' } } };
+  const realScript = 'https://auth.zijieapi.com/ucenter_web/app/second_verification_web/dist/index.umd.production.js?error_code=2046&std_verify_token=abc';
+  assert.equal(String(verificationScript(realScript)), realScript);
+  assert.equal(String(verificationScript({ host: 'lf3-cdn-tos.bytescm.com', path: '/obj/static/ies/passport/verify.js' })), 'https://lf3-cdn-tos.bytescm.com/obj/static/ies/passport/verify.js');
+  for (const bad of ['https://evil.example.com/x.js', 'https://auth.zijieapi.com/not-asset/tool.exe', 'javascript:alert(1)']) assert.throws(() => verificationScript(bad));
+  for (const ok of ['/passport/web/send_code/', '/passport/web/send_voice_code/', '/passport/web/validate_code/', '/passport/web/mobile/check_code/', '/passport/web/account/verify/', '/passport/web/email/send_code/', '/passport/upsms/verify/', '/passport/mobile/can_mobile_auth_verify/', '/passport/safe/query_decision/']) {
+    assert.doesNotThrow(() => verificationRequest({ url: 'https://api.qishui.com' + ok + '?aid=386088', method: 'POST', body: 'x=1' }, flow), ok);
+  }
+  for (const bad of ['/passport/web/logout/', '/passport/web/bind_phone/', '/account/modify/']) {
+    assert.throws(() => verificationRequest({ url: 'https://api.qishui.com' + bad + '?aid=386088', method: 'POST', body: 'x=1' }, flow), /超出允许范围/);
+  }
+});
